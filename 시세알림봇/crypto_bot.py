@@ -2,11 +2,11 @@ import requests
 from config import TELEGRAM_TOKEN, GROUP_CHAT_ID
 
 COINS = [
-    {"id": "bitcoin",                  "name": "비트코인 (BTC)"},
-    {"id": "ethereum",                 "name": "이더리움 (ETH)"},
-    {"id": "solana",                   "name": "솔라나 (SOL)"},
-    {"id": "ripple",                   "name": "리플 (XRP)"},
-    {"id": "ethereum-name-service",    "name": "이더리움 네임서비스 (ENS)"},
+    {"id": "bitcoin",                  "name": "비트코인 (BTC)",          "upbit": "BTC"},
+    {"id": "ethereum",                 "name": "이더리움 (ETH)",           "upbit": "ETH"},
+    {"id": "solana",                   "name": "솔라나 (SOL)",             "upbit": "SOL"},
+    {"id": "ripple",                   "name": "리플 (XRP)",               "upbit": "XRP"},
+    {"id": "ethereum-name-service",    "name": "이더리움 네임서비스 (ENS)", "upbit": "ENS"},
 ]
 
 
@@ -50,6 +50,7 @@ def get_crypto_prices():
             "low": u.get("low_24h", 0),
             "change": change_str,
             "arrow": arrow,
+            "upbit": f"https://upbit.com/exchange?code=CRIX.UPBIT.KRW-{coin['upbit']}",
         })
 
     return results
@@ -65,6 +66,7 @@ def format_message(coins):
             f"  📊 등락률: {c['change']}\n"
             f"  🔺 24h 고가: ${c['high']:,.4f}\n"
             f"  🔻 24h 저가: ${c['low']:,.4f}\n"
+            f"  🔗 업비트: {c['upbit']}\n"
         )
     return "\n".join(lines)
 
