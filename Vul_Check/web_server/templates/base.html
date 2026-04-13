@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}취약점 점검 대시보드{% endblock %}</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f1117;
+      --surface:  #1a1d27;
+      --border:   #2a2d3a;
+      --text:     #e2e8f0;
+      --muted:    #8892a4;
+      --red:      #ef4444;
+      --red-bg:   #2d1515;
+      --yellow:   #f59e0b;
+      --yellow-bg:#2a2000;
+      --green:    #22c55e;
+      --green-bg: #0f2a1a;
+      --blue:     #3b82f6;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* 헤더 */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header .logo { font-size: 18px; font-weight: 700; color: var(--text); text-decoration: none; }
+    header .logo span { color: var(--red); }
+    header nav { margin-left: auto; }
+    header nav a { color: var(--muted); text-decoration: none; font-size: 13px; }
+    header nav a:hover { color: var(--text); }
+
+    /* 메인 */
+    main { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
+
+    /* 페이지 타이틀 */
+    .page-title { font-size: 22px; font-weight: 700; margin-bottom: 24px; }
+    .page-title small { font-size: 13px; font-weight: 400; color: var(--muted); margin-left: 8px; }
+
+    /* 통계 카드 */
+    .stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 32px; }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .stat-card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+    .stat-card .value { font-size: 32px; font-weight: 700; }
+    .stat-card.red    .value { color: var(--red); }
+    .stat-card.yellow .value { color: var(--yellow); }
+    .stat-card.green  .value { color: var(--green); }
+    .stat-card.blue   .value { color: var(--blue); }
+
+    /* 테이블 */
+    .table-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .table-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+      font-size: 15px;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead th {
+      padding: 12px 16px;
+      text-align: left;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,.02);
+    }
+    tbody tr { border-bottom: 1px solid var(--border); transition: background .15s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: rgba(255,255,255,.03); }
+    tbody td { padding: 13px 16px; vertical-align: middle; }
+
+    /* 배지 */
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 99px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .badge-vuln  { background: var(--red-bg);    color: var(--red);    border: 1px solid #5a1a1a; }
+    .badge-check { background: var(--yellow-bg); color: var(--yellow); border: 1px solid #5a4000; }
+    .badge-good  { background: var(--green-bg);  color: var(--green);  border: 1px solid #0a3a1a; }
+    .badge-linux   { background: #1a2a3a; color: #60a5fa; border: 1px solid #1e3a5a; }
+    .badge-windows { background: #1a1a3a; color: #a78bfa; border: 1px solid #2a1a5a; }
+
+    /* 링크 버튼 */
+    .btn {
+      display: inline-block;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      text-decoration: none;
+      font-weight: 500;
+      transition: opacity .15s;
+    }
+    .btn:hover { opacity: .8; }
+    .btn-primary { background: var(--blue); color: #fff; }
+    .btn-back    { background: var(--border); color: var(--text); }
+
+    /* 프로그레스 바 */
+    .progress { height: 6px; background: var(--border); border-radius: 99px; overflow: hidden; min-width: 80px; }
+    .progress-fill { height: 100%; border-radius: 99px; }
+    .progress-fill.red    { background: var(--red); }
+    .progress-fill.yellow { background: var(--yellow); }
+    .progress-fill.green  { background: var(--green); }
+
+    /* 빈 상태 */
+    .empty { padding: 48px; text-align: center; color: var(--muted); }
+
+    /* 섹션 */
+    .section { margin-bottom: 32px; }
+    .section-title {
+      font-size: 15px; font-weight: 600; margin-bottom: 12px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .section-title .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+    }
+
+    /* 반응형 */
+    @media (max-width: 640px) {
+      main { padding: 16px; }
+      .stat-cards { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+  {% block extra_style %}{% endblock %}
+</head>
+<body>
+  <header>
+    <a class="logo" href="/">🛡 Vul<span>Check</span></a>
+    <nav>
+      <a href="/">대시보드</a>
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

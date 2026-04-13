@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block title %}{{ server.hostname }} - 점검 결과{% endblock %}
+
+{% block extra_style %}
+<style>
+  .server-info {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin-bottom: 24px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+  .server-info .hostname { font-size: 20px; font-weight: 700; }
+  .server-info .meta { color: var(--muted); font-size: 13px; }
+
+  .summary-bar {
+    display: flex;
+    gap: 4px;
+    height: 10px;
+    border-radius: 99px;
+    overflow: hidden;
+    margin-bottom: 24px;
+  }
+  .summary-bar .seg { transition: width .3s; }
+
+  .item-table tbody td:first-child { font-family: monospace; font-size: 13px; color: var(--muted); width: 90px; }
+  .item-table tbody td:nth-child(2) { font-weight: 500; }
+  .item-table .detail-text { font-size: 12px; color: var(--muted); margin-top: 3px; }
+
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tab {
+    padding: 7px 16px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    text-decoration: none;
+    transition: all .15s;
+  }
+  .tab:hover { color: var(--text); border-color: var(--muted); }
+  .tab.active-vuln  { background: var(--red-bg);    color: var(--red);    border-color: #5a1a1a; }
+  .tab.active-check { background: var(--yellow-bg); color: var(--yellow); border-color: #5a4000; }
+  .tab.active-good  { background: var(--green-bg);  color: var(--green);  border-color: #0a3a1a; }
+  .tab.active-all   { background: var(--border);    color: var(--text); }
+
+  .item-group { display: none; }
+  .item-group.active { display: block; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 20px;">
+  <a class="btn btn-back" href="/">← 대시보드</a>
+</div>
+
+<!-- 서버 정보 -->
+<div class="server-info">
+  <div>
+    <div class="hostname">{{ server.hostname }}</div>
+    <div class="meta">
+      {% if server.os_type == 'linux' %}🐧 Linux{% else %}🪟 Windows{% endif %}
+      &nbsp;·&nbsp; {{ server.ip or 'IP 없음' }}
+    </div>
+  </div>
+  {% if run %}
+    <div style="margin-left: auto; display:flex; gap:20px; text-align:center;">
+      <div>
+        <div style="font-size:28px; font-weight:700; color:var(--red);">{{ run.vuln_cnt }}</div>
+        <div style="font-size:11px; color:var(--muted);">취약</div>
+      </div>
+      <div>
+        <div style="font-size:28px; font-weight:700; color:var(--yellow);">{{ run.check_cnt }}</div>
+        <div style="font-size:11px; color:var(--muted);">체크필요</div>
+      </div>
+      <div>
+        <div style="font-size:28px; font-weight:700; color:var(--green);">{{ run.good_cnt }}</div>
+        <div style="font-size:11px; color:var(--muted);">양호</div>
+      </div>
+      <div>
+        <div style="font-size:28px; font-weight:700; color:var(--muted);">{{ run.total_cnt }}</div>
+        <div style="font-size:11px; color:var(--muted);">전체</div>
+      </div>
+    </div>
+    <div style="font-size:12px; color:var(--muted); align-self:flex-end;">
+      점검 일시: {{ run.check_time.strftime('%Y-%m-%d %H:%M:%S') }}
+    </div>
+  {% endif %}
+</div>
+
+{% if run %}
+<!-- 비율 바 -->
+{% set total = run.total_cnt or 1 %}
+<div class="summary-bar" title="취약 {{ run.vuln_cnt }} / 체크필요 {{ run.check_cnt }} / 양호 {{ run.good_cnt }}">
+  <div class="seg" style="width:{{ (run.vuln_cnt / total * 100)|round(1) }}%; background:var(--red);"></div>
+  <div class="seg" style="width:{{ (run.check_cnt / total * 100)|round(1) }}%; background:var(--yellow);"></div>
+  <div class="seg" style="width:{{ (run.good_cnt / total * 100)|round(1) }}%; background:var(--green);"></div>
+</div>
+
+<!-- 탭 -->
+<div class="tabs">
+  <a href="#" class="tab active-vuln" onclick="showTab('vuln', this)">🔴 취약 ({{ vuln_items|length }})</a>
+  <a href="#" class="tab" onclick="showTab('check', this)">🟡 체크필요 ({{ check_items|length }})</a>
+  <a href="#" class="tab" onclick="showTab('good', this)">🟢 양호 ({{ good_items|length }})</a>
+  <a href="#" class="tab" onclick="showTab('all', this)">전체 ({{ run.total_cnt }})</a>
+</div>
+
+<!-- 취약 -->
+<div id="tab-vuln" class="item-group active table-wrap section">
+  {% if vuln_items %}
+  <table class="item-table">
+    <thead><tr><th>코드</th><th>항목명</th><th>상태</th></tr></thead>
+    <tbody>
+      {% for item in vuln_items %}
+      <tr>
+        <td>{{ item.code }}</td>
+        <td>
+          {{ item.name }}
+          {% if item.detail %}<div class="detail-text">{{ item.detail }}</div>{% endif %}
+        </td>
+        <td><span class="badge badge-vuln">취약</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <div class="empty">취약 항목 없음 ✅</div>
+  {% endif %}
+</div>
+
+<!-- 체크필요 -->
+<div id="tab-check" class="item-group table-wrap section">
+  {% if check_items %}
+  <table class="item-table">
+    <thead><tr><th>코드</th><th>항목명</th><th>상태</th></tr></thead>
+    <tbody>
+      {% for item in check_items %}
+      <tr>
+        <td>{{ item.code }}</td>
+        <td>
+          {{ item.name }}
+          {% if item.detail %}<div class="detail-text">{{ item.detail }}</div>{% endif %}
+        </td>
+        <td><span class="badge badge-check">체크필요</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <div class="empty">체크필요 항목 없음</div>
+  {% endif %}
+</div>
+
+<!-- 양호 -->
+<div id="tab-good" class="item-group table-wrap section">
+  {% if good_items %}
+  <table class="item-table">
+    <thead><tr><th>코드</th><th>항목명</th><th>상태</th></tr></thead>
+    <tbody>
+      {% for item in good_items %}
+      <tr>
+        <td>{{ item.code }}</td>
+        <td>
+          {{ item.name }}
+          {% if item.detail %}<div class="detail-text">{{ item.detail }}</div>{% endif %}
+        </td>
+        <td><span class="badge badge-good">양호</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <div class="empty">양호 항목 없음</div>
+  {% endif %}
+</div>
+
+<!-- 전체 -->
+<div id="tab-all" class="item-group table-wrap section">
+  <table class="item-table">
+    <thead><tr><th>코드</th><th>항목명</th><th>상태</th></tr></thead>
+    <tbody>
+      {% for item in (vuln_items + check_items + good_items)|sort(attribute='code') %}
+      <tr>
+        <td>{{ item.code }}</td>
+        <td>
+          {{ item.name }}
+          {% if item.detail %}<div class="detail-text">{{ item.detail }}</div>{% endif %}
+        </td>
+        <td>
+          {% if item.result == '취약' %}
+            <span class="badge badge-vuln">취약</span>
+          {% elif item.result == '체크필요' %}
+            <span class="badge badge-check">체크필요</span>
+          {% else %}
+            <span class="badge badge-good">양호</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% else %}
+  <div class="empty" style="background:var(--surface); border:1px solid var(--border); border-radius:10px;">
+    아직 점검 기록이 없습니다.<br>
+    <span style="font-size:13px; margin-top:8px; display:block;">에이전트를 실행해 주세요.</span>
+  </div>
+{% endif %}
+
+<script>
+  const tabClassMap = { vuln: 'active-vuln', check: 'active-check', good: 'active-good', all: 'active-all' };
+  function showTab(name, el) {
+    event.preventDefault();
+    document.querySelectorAll('.item-group').forEach(d => d.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    document.querySelectorAll('.tab').forEach(t => {
+      Object.values(tabClassMap).forEach(c => t.classList.remove(c));
+    });
+    el.classList.add(tabClassMap[name]);
+  }
+</script>
+{% endblock %}

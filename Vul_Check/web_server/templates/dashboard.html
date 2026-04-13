@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}취약점 점검 대시보드{% endblock %}
+
+{% block content %}
+<div class="page-title">
+  멀티 서버 취약점 대시보드
+  <small>주요정보통신기반시설 보안 점검</small>
+</div>
+
+<!-- 통계 카드 -->
+<div class="stat-cards">
+  <div class="stat-card blue">
+    <div class="label">전체 서버</div>
+    <div class="value">{{ total_servers }}</div>
+  </div>
+  <div class="stat-card red">
+    <div class="label">총 취약 항목</div>
+    <div class="value">{{ total_vuln }}</div>
+  </div>
+  <div class="stat-card yellow">
+    <div class="label">총 체크필요</div>
+    <div class="value">{{ total_check }}</div>
+  </div>
+</div>
+
+<!-- 서버 목록 -->
+<div class="table-wrap">
+  <div class="table-header">서버 목록</div>
+  {% if servers %}
+  <table>
+    <thead>
+      <tr>
+        <th>호스트명</th>
+        <th>OS</th>
+        <th>IP</th>
+        <th>최근 점검</th>
+        <th>취약</th>
+        <th>체크필요</th>
+        <th>양호</th>
+        <th>취약 비율</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for server in servers %}
+        {% set run = server.latest_run %}
+        <tr>
+          <td><strong>{{ server.hostname }}</strong></td>
+          <td>
+            {% if server.os_type == 'linux' %}
+              <span class="badge badge-linux">🐧 Linux</span>
+            {% else %}
+              <span class="badge badge-windows">🪟 Windows</span>
+            {% endif %}
+          </td>
+          <td style="color: var(--muted);">{{ server.ip or '-' }}</td>
+          <td style="color: var(--muted); font-size: 13px;">
+            {% if server.last_check_at %}
+              {{ server.last_check_at.strftime('%Y-%m-%d %H:%M') }}
+            {% else %}-{% endif %}
+          </td>
+          {% if run %}
+            <td><span class="badge badge-vuln">{{ run.vuln_cnt }}</span></td>
+            <td><span class="badge badge-check">{{ run.check_cnt }}</span></td>
+            <td><span class="badge badge-good">{{ run.good_cnt }}</span></td>
+            <td>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <div class="progress">
+                  <div class="progress-fill red" style="width:{{ run.vuln_rate }}%"></div>
+                </div>
+                <span style="font-size:12px; color:var(--muted); white-space:nowrap;">{{ run.vuln_rate }}%</span>
+              </div>
+            </td>
+          {% else %}
+            <td colspan="4" style="color:var(--muted); font-size:13px;">점검 기록 없음</td>
+          {% endif %}
+          <td><a class="btn btn-primary" href="/server/{{ server.id }}">상세 보기</a></td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <div class="empty">
+      등록된 서버가 없습니다.<br>
+      <span style="font-size:13px; margin-top:8px; display:block;">에이전트를 실행하면 자동으로 등록됩니다.</span>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}
