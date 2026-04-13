@@ -2,8 +2,11 @@ import requests
 from config import TELEGRAM_TOKEN, GROUP_CHAT_ID
 
 COINS = [
-    {"id": "ripple",   "name": "리플 (XRP)"},
-    {"id": "ethereum", "name": "이더리움 (ETH)"},
+    {"id": "bitcoin",                  "name": "비트코인 (BTC)"},
+    {"id": "ethereum",                 "name": "이더리움 (ETH)"},
+    {"id": "solana",                   "name": "솔라나 (SOL)"},
+    {"id": "ripple",                   "name": "리플 (XRP)"},
+    {"id": "ethereum-name-service",    "name": "이더리움 네임서비스 (ENS)"},
 ]
 
 
