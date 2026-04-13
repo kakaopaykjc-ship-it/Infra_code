@@ -1,0 +1,38 @@
+[Unit]
+Description=사내 Wiki (Gunicorn)
+After=network.target
+
+[Service]
+User=wiki
+Group=wiki
+WorkingDirectory=/opt/wiki
+EnvironmentFile=/opt/wiki/.env
+
+# gunicorn: 워커 4개, 소켓 통신
+ExecStart=/opt/wiki/venv/bin/gunicorn \
+    --workers 4 \
+    --bind unix:/run/wiki/wiki.sock \
+    --timeout 60 \
+    --access-logfile /var/log/wiki/access.log \
+    --error-logfile /var/log/wiki/error.log \
+    app:app
+
+ExecReload=/bin/kill -s HUP $MAINPID
+
+# 소켓/로그 디렉터리 자동 생성
+RuntimeDirectory=wiki
+RuntimeDirectoryMode=0750
+LogsDirectory=wiki
+LogsDirectoryMode=0750
+
+Restart=on-failure
+RestartSec=5
+
+# 보안 강화
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/wiki/uploads /opt/wiki/wiki.db /var/log/wiki
+
+[Install]
+WantedBy=multi-user.target

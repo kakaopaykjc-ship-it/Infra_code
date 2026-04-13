@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.title }} — 사내 Wiki{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+  <div class="col-lg-9">
+    <!-- 문서 헤더 -->
+    <div class="d-flex align-items-start justify-content-between mb-3">
+      <div>
+        <h2 class="fw-bold mb-1">{{ doc.title }}</h2>
+        <small class="text-muted">
+          <i class="bi bi-person me-1"></i>{{ doc.author.display_name }}
+          &nbsp;·&nbsp;
+          <i class="bi bi-calendar me-1"></i>{{ doc.created_at.strftime('%Y-%m-%d') }}
+          {% if doc.updated_by %}
+          &nbsp;·&nbsp;
+          <i class="bi bi-pencil me-1"></i>{{ doc.updated_by.display_name }} 수정
+          ({{ doc.updated_at.strftime('%Y-%m-%d %H:%M') }})
+          {% endif %}
+          {% if doc.category %}
+          &nbsp;·&nbsp;
+          <span class="badge bg-primary">{{ doc.category.name }}</span>
+          {% endif %}
+          {% if not doc.is_public %}
+          &nbsp;<span class="badge bg-secondary"><i class="bi bi-lock-fill"></i> 비공개</span>
+          {% endif %}
+        </small>
+      </div>
+      <div class="d-flex gap-2">
+        <a href="{{ url_for('doc_edit', doc_id=doc.id) }}" class="btn btn-outline-primary btn-sm">
+          <i class="bi bi-pencil me-1"></i>편집
+        </a>
+        <a href="{{ url_for('doc_history', doc_id=doc.id) }}" class="btn btn-outline-secondary btn-sm">
+          <i class="bi bi-clock-history me-1"></i>이력
+        </a>
+        {% if current_user.is_admin %}
+        <form action="{{ url_for('doc_delete', doc_id=doc.id) }}" method="post"
+              onsubmit="return confirm('정말 삭제하시겠습니까?')">
+          <button class="btn btn-outline-danger btn-sm">
+            <i class="bi bi-trash me-1"></i>삭제
+          </button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+
+    <hr>
+
+    <!-- 문서 본문 -->
+    <div class="wiki-content">
+      {{ html_content | safe }}
+    </div>
+
+    <!-- 첨부파일 -->
+    {% if doc.attachments %}
+    <hr>
+    <h6 class="fw-bold"><i class="bi bi-paperclip me-2"></i>첨부파일 ({{ doc.attachments|length }})</h6>
+    <ul class="list-group list-group-flush">
+      {% for att in doc.attachments %}
+      <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+        <div>
+          {% if att.original_name.lower().split('.')[-1] in ['png','jpg','jpeg','gif','webp'] %}
+            <i class="bi bi-image text-success me-2"></i>
+          {% else %}
+            <i class="bi bi-file-earmark me-2 text-secondary"></i>
+          {% endif %}
+          <a href="{{ url_for('download_file', att_id=att.id) }}">{{ att.original_name }}</a>
+          <small class="text-muted ms-2">({{ (att.file_size / 1024)|round(1) }} KB)</small>
+        </div>
+        <small class="text-muted">{{ att.uploaded_at.strftime('%Y-%m-%d') }}</small>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+
+  <!-- 사이드 패널 -->
+  <div class="col-lg-3">
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="card-header bg-white fw-bold small">문서 정보</div>
+      <div class="card-body small text-muted">
+        <p class="mb-1"><i class="bi bi-person me-1"></i>작성자: <strong>{{ doc.author.display_name }}</strong></p>
+        <p class="mb-1"><i class="bi bi-calendar-plus me-1"></i>생성: {{ doc.created_at.strftime('%Y-%m-%d') }}</p>
+        <p class="mb-1"><i class="bi bi-calendar-check me-1"></i>수정: {{ doc.updated_at.strftime('%Y-%m-%d') }}</p>
+        <p class="mb-0"><i class="bi bi-paperclip me-1"></i>첨부: {{ doc.attachments|length }}개</p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

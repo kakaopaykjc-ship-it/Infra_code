@@ -1,0 +1,2476 @@
+﻿# --------------------------------------------------------------------------------
+# 스크립트 명: Windows 서버 취약점 점검 통합 스크립트
+# --------------------------------------------------------------------------------
+chcp 65001 | Out-Null
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+# [관리자 권한 확인] - secedit 실행을 위해 필수
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    Write-Warning "이 스크립트는 관리자 권한으로 실행해야 합니다!"
+    # 강제 종료를 원하면 아래 주석 해제
+    # exit
+}
+
+# 변수 및 결과 저장 설정
+$ResultFile = "Win_Vul_Check_Result_$(Get-Date -Format 'yyyyMMdd').txt"
+$CsvFile = "Win_Vul_Check_Result_$(Get-Date -Format 'yyyyMMdd').csv"
+$GoodCnt = 0; $VulnCnt = 0; $CheckCnt = 0
+$RESULT = @{}; $DETAIL = @{}; $NAME = @{}
+$VulnUnit = @(); $CheckUnit = @()
+$ResultsList = @()
+
+# 로컬 보안 정책(Secedit) 미리 추출
+Write-Host "보안 정책 데이터를 추출 중입니다..."
+$SecPolFile = "$env:TEMP\secpol.cfg"
+# 기존 파일이 있다면 삭제
+Remove-Item $SecPolFile -ErrorAction SilentlyContinue 
+secedit /export /cfg $SecPolFile /quiet
+
+if (Test-Path $SecPolFile) {
+    $SecPolContent = Get-Content $SecPolFile
+} else {
+    Write-Warning "보안 정책 파일을 생성하지 못했습니다. (관리자 권한 확인 필요)"
+}
+
+# 3. 공통 함수: 정책 값을 안전하게 가져오는 도구
+function Get-PolicyValue ($Pattern) {
+    # 1. 파일 경로 확인
+    $File = $script:SecPolFile
+    if (-not (Test-Path $File)) { return $null }
+
+    # Select-String으로 파일 직접 검색 
+    $Match = Select-String -Path $File -Pattern $Pattern | Select-Object -First 1
+    
+    if ($Match) {
+        try {
+            # "Key = Value" 형태에서 등호(=) 뒤의 숫자만 추출
+            return [int]$Match.Line.Split('=')[1].Trim()
+        } catch {
+            return $null
+        }
+    }
+    return $null
+}
+
+# 결과 파일 초기화
+"[주요정보통신기반시설 Windows 서버 취약점 점검 결과]" | Out-File $ResultFile -Encoding utf8
+"점검 일시: $(Get-Date)" | Out-File $ResultFile -Append -Encoding utf8
+"--------------------------------------------------------`n" | Out-File $ResultFile -Append -Encoding utf8
+
+# 결과 출력 및 객체 저장 함수
+function print_result($CODE, $ITEM_NAME, $RES, $DET){
+    switch($RES){
+        "양호" { $script:GoodCnt++ }
+        "취약" { $script:VulnCnt++; $script:VulnUnit += $CODE }
+        "체크필요" { $script:CheckCnt++; $script:CheckUnit += $CODE }
+    }
+    $resultObj = [PSCustomObject]@{ 번호 = $CODE; 항목명 = $ITEM_NAME; 결과 = $RES; 상세내용 = $DET }
+    $script:ResultsList += $resultObj
+
+    "[$CODE] $ITEM_NAME" | Out-File $ResultFile -Append -Encoding utf8
+    "결과 : $RES" | Out-File $ResultFile -Append -Encoding utf8
+    "상세 : $DET" | Out-File $ResultFile -Append -Encoding utf8
+    "----------------------------------------------`n" | Out-File $ResultFile -Append -Encoding utf8
+    Write-Host "[$CODE] 점검 완료 -> $RES"
+}
+
+
+# --------------------------------------------------------------------------------
+# 점검 함수 정의 영역 (W-01 ~ W-64)]
+# --------------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------------
+# W-01. Administrator 계정 이름 변경 등 보안성 강화
+# --------------------------------------------------------------------------------
+function W_01 {
+    $CODE = "W-01"; $script:NAME[$CODE] = "Administrator 계정 이름 변경"
+    
+    # SID가 500번으로 끝나는 계정(실제 관리자) 찾기
+    $Admin = Get-LocalUser | Where-Object { $_.SID -like "S-1-5-*-500" }
+
+    if ($Admin.Name -eq "Administrator") { 
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "관리자 계정명이 기본값(Administrator)입니다." 
+    } else { 
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "관리자 계정명이 변경되었습니다 ($($Admin.Name))." 
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-02. Guest 계정 비활성화
+# --------------------------------------------------------------------------------
+function W_02 {
+    $CODE = "W-02"; $script:NAME[$CODE] = "Guest 계정 비활성화"
+    
+    # SID가 501번으로 끝나는 Guest 계정 찾기
+    $Guest = Get-LocalUser | Where-Object { $_.SID -like "S-1-5-*-501" }
+
+    if ($Guest.Enabled) { 
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "Guest 계정이 활성화되어 있습니다." 
+    } else { 
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "Guest 계정이 비활성화되어 있습니다." 
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-03. 불필요한 계정 제거
+# --------------------------------------------------------------------------------
+function W_03 {
+    $CODE = "W-03"; $script:NAME[$CODE] = "불필요한 계정 제거"
+    
+    # 현재 활성화된(Enabled=True) 계정 목록 추출
+    $ActiveUsers = (Get-LocalUser | Where-Object { $_.Enabled -eq $true }).Name -join ", "
+
+    $script:RESULT[$CODE] = "체크필요"
+    $script:DETAIL[$CODE] = "현재 활성 계정: $ActiveUsers (검토 후 불필요한 계정은 삭제/비활성 필요)"
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-04. 계정 잠금 임계값 설정
+# --------------------------------------------------------------------------------
+function W_04 {
+    $CODE = "W-04"; $script:NAME[$CODE] = "계정 잠금 임계값 설정"
+    
+    # 공통 함수로 정책 값 가져오기
+    $Val = Get-PolicyValue "LockoutBadCount"
+    
+    # 값이 없으면(Null) 0(설정안됨-취약)으로 처리
+    if ($null -eq $Val) { $Val = 0 }
+
+    # [판단 기준] 1회 ~ 5회 사이면 양호
+    if ($Val -gt 0 -and $Val -le 5) { 
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "임계값 설정됨 ($Val`회)" 
+    } else { 
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "임계값이 설정되지 않았거나 5회를 초과했습니다. (현재: $Val)" 
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-05. 해독 가능한 암호화 사용 해제
+# --------------------------------------------------------------------------------
+function W_05 {
+    $CODE = "W-05"; $script:NAME[$CODE] = "해독 가능한 암호화 사용 해제"
+    
+    $Val = Get-PolicyValue "ClearTextPassword"
+    
+    # 값이 없으면 1(사용함-취약)로 간주 (보안상 안전한 판단)
+    if ($null -eq $Val) { $Val = 1 }
+
+    # [판단 기준] 0(사용 안 함)이어야 양호
+    if ($Val -eq 0) { 
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "해독 가능한 암호화 기능이 비활성화되어 있습니다." 
+    } else { 
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "해독 가능한 암호화 기능이 활성화되어 있습니다." 
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-06. 관리자 그룹에 최소한의 사용자 포함
+# --------------------------------------------------------------------------------
+function W_06 {
+    $CODE = "W-06"; $script:NAME[$CODE] = "관리자 그룹에 최소한의 사용자 포함"
+    
+    # Administrators 그룹 멤버 조회
+    $Admins = Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue
+    
+    if ($Admins) {
+        $Names = $Admins.Name -join ", "
+        # 멤버가 1명(Administrator 등)이면 양호, 그 외엔 확인 필요
+        if ($Admins.Count -le 1) {
+            $script:RESULT[$CODE] = "양호"
+            $script:DETAIL[$CODE] = "관리자 그룹에 불필요한 계정이 없습니다. ($Names)"
+        } else {
+            $script:RESULT[$CODE] = "체크필요"
+            $script:DETAIL[$CODE] = "관리자 그룹 멤버 확인 필요: $Names"
+        }
+    } else {
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "그룹 멤버를 조회할 수 없습니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-07. Everyone 사용 권한을 익명 사용자에게 적용
+# --------------------------------------------------------------------------------
+function W_07 {
+    $CODE = "W-07"; $script:NAME[$CODE] = "Everyone 사용 권한을 익명 사용자에게 적용"
+    
+    $Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    $Reg = Get-ItemProperty -Path $Path -Name "everyoneincludesanonymous" -ErrorAction SilentlyContinue
+
+    # 값이 없거나 0이면 양호
+    if ($null -eq $Reg -or $Reg.everyoneincludesanonymous -eq 0) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "익명 사용자에게 권한이 적용되지 않습니다."
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "익명 사용자에게 Everyone 권한이 허용되어 있습니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-08. 계정 잠금 기간 설정
+# --------------------------------------------------------------------------------
+function W_08 {
+    $CODE = "W-08"; $script:NAME[$CODE] = "계정 잠금 기간 설정"
+    
+    $Val = Get-PolicyValue "LockoutDuration"
+    if ($null -eq $Val) { $Val = 0 } # 못 읽으면 0(취약) 처리
+
+    # 60분 이상 또는 -1(관리자가 풀 때까지)
+    if ($Val -ge 60 -or $Val -eq -1) { 
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "잠금 기간: $Val`분" 
+    } else { 
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "잠금 기간 미흡 (현재: $Val`분, 기준: 60분 이상)" 
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-09. 비밀번호 관리정책 설정
+# --------------------------------------------------------------------------------
+function W_09 {
+    $CODE = "W-09"; $script:NAME[$CODE] = "비밀번호 관리정책 설정"
+    
+    # 1단계에서 수정한 함수로 값을 읽어옵니다.
+    $Comp   = Get-PolicyValue "PasswordComplexity"
+    $Len    = Get-PolicyValue "MinimumPasswordLength"
+    $MaxAge = Get-PolicyValue "MaximumPasswordAge"
+    $MinAge = Get-PolicyValue "MinimumPasswordAge"
+
+    # [중요] 값을 못 읽어왔으면(Null) 0으로 설정하여 '취약'으로 유도
+    if ($null -eq $Comp)   { $Comp = 0 }   
+    if ($null -eq $Len)    { $Len = 0 }    
+    if ($null -eq $MaxAge) { $MaxAge = 0 } 
+    if ($null -eq $MinAge) { $MinAge = 0 } 
+
+    $Info = "복잡성:$Comp, 길이:$Len, 최대기간:$MaxAge, 최소기간:$MinAge"
+
+    # [판단 기준]
+    # 1. 복잡성 == 1
+    # 2. 길이 >= 8
+    # 3. 최대 기간 <= 90 (0은 만료 없음이므로 취약)
+    # 4. 최소 기간 >= 1
+    if ($Comp -eq 1 -and $Len -ge 8 -and ($MaxAge -le 90 -and $MaxAge -gt 0) -and $MinAge -ge 1) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "모든 정책 만족 ($Info)"
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $Reason = @()
+        if ($Comp -ne 1) { $Reason += "복잡성 미사용" }
+        if ($Len -lt 8) { $Reason += "길이 미달" }
+        if ($MaxAge -gt 90 -or $MaxAge -eq 0) { $Reason += "교체주기($MaxAge) 미흡" }
+        if ($MinAge -lt 1) { $Reason += "최소사용기간 미흡" }
+        
+        $script:DETAIL[$CODE] = "정책 미흡: $($Reason -join ', ') ($Info)"
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-10. 마지막 사용자 이름 표시 안 함
+# --------------------------------------------------------------------------------
+function W_10 {
+    $CODE = "W-10"; $script:NAME[$CODE] = "마지막 사용자 이름 표시 안 함"
+    
+    $Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    $Reg = Get-ItemProperty -Path $Path -Name "dontdisplaylastusername" -ErrorAction SilentlyContinue
+
+    if ($Reg -and $Reg.dontdisplaylastusername -eq 1) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "설정됨"
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "로그온 창에 아이디가 표시됩니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-11. 로컬 로그온 허용
+# --------------------------------------------------------------------------------
+function W_11 {
+    $CODE = "W-11"; $script:NAME[$CODE] = "로컬 로그온 허용"
+    
+    # 1. 파일에서 'SeInteractiveLogonRight' 줄을 찾습니다.
+    # $script:SecPolContent가 없거나 패턴을 못 찾으면 $LogonRight는 null이 됩니다.
+    if ($script:SecPolContent) {
+        $Match = $script:SecPolContent | Select-String "SeInteractiveLogonRight"
+        if ($Match) {
+            $LogonRight = $Match.ToString()
+        } else {
+            $LogonRight = $null
+        }
+    } else {
+        $LogonRight = $null
+    }
+
+    # 값을 읽지 못했다면 '체크필요'로 분류
+    if ($null -eq $LogonRight) {
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "정책 값을 읽을 수 없습니다. (정책 파일 오류 또는 설정 없음)"
+        print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+        return
+    }
+    
+    # 2. 취약 그룹(Everyone, Guests) 확인
+    if (($LogonRight -match "S-1-1-0" -or $LogonRight -match "Everyone" -or $LogonRight -match "Guests") -or ($null -eq $LogonRight)) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "Everyone 또는 Guests 그룹에 로컬 로그온 권한이 있습니다."
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "로컬 로그온 권한이 적절하게 제한되어 있습니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-12. 익명 SID/이름 변환 허용 해제
+# --------------------------------------------------------------------------------
+function W_12 {
+    $CODE = "W-12"; $script:NAME[$CODE] = "익명 SID/이름 변환 허용 해제"
+    
+    # 공통 함수로 값 가져오기
+    $LSA = Get-PolicyValue "LSAAnonymousNameLookup"
+    
+    if ($LSA -eq 0 -or $null -eq $LSA) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "익명 SID/이름 변환이 허용되지 않습니다."
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "익명 SID/이름 변환이 허용되어 있습니다 (설정값: $LSA)."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-13. 콘솔 로그온 시 빈 암호 사용 제한
+# --------------------------------------------------------------------------------
+function W_13 {
+    $CODE = "W-13"; $script:NAME[$CODE] = "콘솔 로그온 시 빈 암호 사용 제한"
+    
+    $Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    $Reg = Get-ItemProperty -Path $Path -Name "LimitBlankPasswordUse" -ErrorAction SilentlyContinue
+
+
+    # 1이거나 값이 없으면 양호
+    if (($null -eq $Reg) -or ($Reg.LimitBlankPasswordUse -eq 1)) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "콘솔 로그온 시 빈 암호 사용이 제한되어 있습니다. (설정값: 1 또는 기본값)"
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "콘솔 로그온 시 빈 암호 사용 제한이 해제되어 있습니다. (설정값: 0)"
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-14. 원격터미널 접속 사용자 제한
+# --------------------------------------------------------------------------------
+function W_14 {
+    $CODE = "W-14"; $script:NAME[$CODE] = "원격터미널 접속 사용자 제한"
+    
+    $RDPUsers = Get-LocalGroupMember -Group "Remote Desktop Users" -ErrorAction SilentlyContinue
+    
+    # (Remote Desktop Users 그룹이 비어있으면 관리자만 접속 가능하므로 안전함)
+    if ($null -eq $RDPUsers) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "Remote Desktop Users 그룹에 추가된 계정이 없습니다 (관리자만 접속 가능)."
+    } else {
+        $UserNames = $RDPUsers.Name -join ", "
+        
+        if ($UserNames -match "Everyone") {
+             $script:RESULT[$CODE] = "취약"
+             $script:DETAIL[$CODE] = "Remote Desktop Users 그룹에 Everyone이 포함되어 있습니다."
+        } else {
+             # 멤버 목록 보여주고 '양호' (관리자가 의도한 계정일 수 있으므로)
+             $script:RESULT[$CODE] = "양호"
+             $script:DETAIL[$CODE] = "RDP 사용자 목록: $UserNames"
+        }
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-15. 사용자 개인키 사용 시 암호 입력 (정책 확인 자동화)
+# --------------------------------------------------------------------------------
+function W_15 {
+    $CODE = "W-15"; $script:NAME[$CODE] = "사용자 개인키 사용 시 암호 입력"
+    
+    # 경로: HKLM:\SOFTWARE\Policies\Microsoft\Cryptography
+    # 값: ForceStrongKeyProtection
+    # 0: 암호 입력 안 함 (취약)
+    # 1: 처음 사용할 때만 입력 (취약)
+    # 2: 사용할 때마다 매번 입력 (양호)
+    # 그러나 실제 서비스 환경에서는 사용 불가, 체크 필요로 설정해둠
+    
+    $Path = "HKLM:\SOFTWARE\Policies\Microsoft\Cryptography"
+    $Reg = Get-ItemProperty -Path $Path -Name "ForceStrongKeyProtection" -ErrorAction SilentlyContinue
+
+    <#if ($Reg -and $Reg.ForceStrongKeyProtection -eq 2) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "키를 사용할 때마다 암호를 입력하도록 설정되어 있습니다. (값: 2)"
+    } else {
+        $Val = if ($Reg) { $Reg.ForceStrongKeyProtection } else { "설정없음" }
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "개인키 보호 정책이 기준(매번 입력)에 미치지 못합니다. (현재값: $Val), 키 사용시 암호 입력 옵션을 켰을 때 장애 여부 체크 필요"
+    }#>
+
+    $script:RESULT[$CODE] = "체크필요"
+    $script:DETAIL[$CODE] = "해당 내용 설정 시 서비스 오류 발생 가능성 존재, 조치 불가"
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-16. 공유 권한 및 사용자 그룹 설정 (Everyone 권한 정밀 점검)
+# --------------------------------------------------------------------------------
+function W_16 {
+    $CODE = "W-16"; $script:NAME[$CODE] = "공유 권한 및 사용자 그룹 설정"
+    
+    # 1. 기본 공유($로 끝나는 것: C$, ADMIN$, IPC$ 등)를 제외한 일반 공유 폴더 찾기
+    $Shares = Get-SmbShare | Where-Object { $_.Name -notlike "*$" }
+    
+    $VulnShares = @()
+
+    if ($Shares) {
+        foreach ($Share in $Shares) {
+            # 2. 각 공유 폴더의 접근 권한 목록(ACL) 조회
+            $Access = Get-SmbShareAccess -Name $Share.Name -ErrorAction SilentlyContinue
+            
+            # 3. 권한 목록에 'Everyone' 또는 SID 'S-1-1-0'이 포함되어 있는지 확인
+            # (계정 이름이 한글 윈도우에서는 'Everyone'이 아닐 수도 있으므로 SID로도 체크)
+            $HasEveryone = $Access | Where-Object { 
+                $_.AccountName -match "Everyone" -or $_.SecurityIdentifier -match "S-1-1-0" 
+            }
+
+            if ($HasEveryone) {
+                $VulnShares += $Share.Name
+            }
+        }
+    }
+
+    if ($VulnShares.Count -gt 0) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "Everyone 권한이 포함된 공유 폴더가 발견되었습니다: $($VulnShares -join ', ')"
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "일반 공유 폴더가 없거나, Everyone 권한이 제거되어 있습니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-17. 하드디스크 기본 공유 제거
+# --------------------------------------------------------------------------------
+function W_17 {
+    $CODE = "W-17"; $script:NAME[$CODE] = "하드디스크 기본 공유 제거"
+    
+    # 레지스트리에서 AutoShareServer(서버용) 확인. (워크스테이션은 AutoShareWks이나 서버 점검이므로 Server 우선)
+    $Path = "HKLM:\SYSTEM\CurrentControlSet\Services\lanmanserver\parameters"
+    $Reg = Get-ItemProperty -Path $Path -Name "AutoShareServer" -ErrorAction SilentlyContinue
+
+    # 값이 0이어야 기본 공유가 제거된 상태(양호)
+    if ($Reg -and $Reg.AutoShareServer -eq 0) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "하드디스크 기본 공유가 제거되어 있습니다 (AutoShareServer=0)."
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "하드디스크 기본 공유가 활성화되어 있습니다 (레지스트리 설정 필요)."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-18. 불필요한 서비스 제거 (가이드라인 목록 21개 전체 점검)
+# --------------------------------------------------------------------------------
+function W_18 {
+    $CODE = "W-18"; $script:NAME[$CODE] = "불필요한 서비스 제거"
+    
+    # [점검 대상 서비스 목록 (21개)]
+    # 가이드라인(이미지)에 명시된 모든 서비스를 점검합니다.
+    # 일부 서비스(DHCP, DNS, CryptSvc 등)는 사용 환경에 따라 필수일 수 있으므로,
+    # '취약'으로 나오더라도 실제 사용 여부를 검토해야 합니다.
+    
+    $TargetServices = @(
+        "Alerter",          # Alerter (경고 메시지 전송)
+        "wuauserv",         # Automatic Updates (자동 업데이트) - 수동 업데이트 혹은 MS 패치 관리 서버로 패치 적용 시 필요 없음
+        "ClipSrv",          # Clipbook (클립북 공유)
+        "Browser",          # Computer Browser (네트워크 목록) - 네트워크로 연결된 모든 컴퓨터 목록 관리하는 서비스
+        "CryptSvc",         # Cryptographic Services (암호화 서비스)
+        "Dhcp",             # DHCP Client (DHCP 클라이언트) - 고정 IP 사용시 불필요
+        "TrkWks",           # Distributed Link Tracking Client
+        "TrkSvr",           # Distributed Link Tracking Server
+        "Dnscache",         # DNS Client (DNS 캐시)
+        "WerSvc", "ERSvc",  # Error reporting Service (오류 보고)
+        "hidserv",          # Human Interface Device Access (HID 장치)
+        "ImapiService",     # IMAPI CD-Burning COM Service (CD굽기)
+        "irmon",            # Infrared Monitor (적외선)
+        "Messenger",        # Messenger (메신저)
+        "mnmsrvc",          # NetMeeting Remote Desktop Sharing
+        "WmdmPmSN",         # Portable Media Serial Number
+        "Spooler",          # Print Spooler (프린터 스풀러)
+        "RemoteRegistry",   # Remote Registry (원격 레지스트리)
+        "SimpTcp",          # Simple TCP/IP Services
+        "upnphost",         # Universal Plug and Play Device Host (UPnP)
+        "WZCSVC", "WlanSvc" # Wireless Zero Configuration (무선랜)
+    )
+    
+    # 구동 중(Running)인 서비스 찾기
+    $RunningSvcs = Get-Service -Name $TargetServices -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Running" }
+    
+    if ($RunningSvcs) {
+        $Count = $RunningSvcs.Count
+        $Names = $RunningSvcs.Name -join ", "
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "불필요(점검대상) 서비스 $Count`개가 실행 중입니다: $Names"
+        $script:DETAIL[$CODE] = "해당 서비스가 구동이 필요한지 확인 바랍니다."
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "가이드라인에 명시된 불필요한 서비스들이 모두 중지되어 있습니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+
+
+
+
+
+# --------------------------------------------------------------------------------
+# W-19. 불필요한 IIS 서비스 구동 점검
+# --------------------------------------------------------------------------------
+function W_19 {
+    $CODE = "W-19"; $script:NAME[$CODE] = "불필요한 IIS 서비스 구동 점검"
+    
+    # W3SVC (World Wide Web Publishing Service) 상태 확인
+    $IIS = Get-Service "W3SVC" -ErrorAction SilentlyContinue
+    
+    if ($IIS.Status -eq "Running") {
+        # IIS가 켜져 있으면 '체크필요' (웹서버 용도라면 정상이지만, 불필요할 수도 있으므로)
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "IIS 웹 서비스(W3SVC)가 실행 중입니다. 웹 서버 용도가 아니라면 중지하세요."
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "IIS 웹 서비스가 실행 중이지 않습니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+
+
+
+# --------------------------------------------------------------------------------
+# W-20. NetBIOS 바인딩 서비스 구동 점검
+# --------------------------------------------------------------------------------
+function W_20 {
+    $CODE = "W-20"; $script:NAME[$CODE] = "NetBIOS 바인딩 서비스 구동 점검"
+    
+    # [점검 기준] 네트워크 어댑터 속성 > WINS > "NetBIOS over TCP/IP 사용 안 함" 선택 여부
+    # Win32_NetworkAdapterConfiguration 클래스의 TcpipNetbiosOptions 속성 확인
+    # 0 : DHCP 서버 설정 사용 (기본값) -> '취약'
+    # 1 : NetBIOS 사용 (활성화) -> '취약'
+    # 2 : NetBIOS 사용 안 함 (비활성화) -> '양호'
+
+    $Adapters = Get-CimInstance Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true }
+    $VulnAdapters = @()
+
+    foreach ($Adapter in $Adapters) {
+        # 설정값이 2(사용 안 함)가 아닌 경우 모두 취약으로 판단
+        if ($Adapter.TcpipNetbiosOptions -ne 2) {
+            # 0인 경우(DHCP)와 1인 경우(사용)를 구분하여 상세 메시지 생성
+            $StatusStr = if ($Adapter.TcpipNetbiosOptions -eq 0) { "DHCP사용(기본값)" } else { "사용함" }
+            $VulnAdapters += "$($Adapter.Description) [$StatusStr]"
+        }
+    }
+
+    if ($VulnAdapters.Count -gt 0) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "NetBIOS가 차단되지 않은 어댑터가 있습니다: " + ($VulnAdapters -join ", ")
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "모든 네트워크 어댑터에서 NetBIOS가 '사용 안 함'으로 설정되어 있습니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-21. 암호화되지 않는 FTP 서비스 비활성화 (3rd Party 및 IIS 상황 통합 고려)
+# --------------------------------------------------------------------------------
+function W_21 {
+    $CODE = "W-21"; $script:NAME[$CODE] = "암호화되지 않는 FTP 서비스 비활성화"
+    
+    # 1. Windows 기본 FTP 서비스(ftpsvc) 상태 확인
+    $FTP = Get-Service "ftpsvc" -ErrorAction SilentlyContinue
+
+    if ($null -eq $FTP -or $FTP.Status -ne "Running") {
+        # 서비스가 꺼져 있으면'양호'
+
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "Windows 기본 FTP 서비스가 중지되어 있습니다. (타사 FTP 사용 시에도 이 상태가 권장됨)"
+    } else {
+        # 2. 서비스가 켜져 있음 -> IIS 설정을 통해 SSL 강제 여부 확인
+        # (ftpsvc는 IIS의 하위 구성요소로 관리됩니다)
+        if (Get-Module -ListAvailable -Name WebAdministration) {
+            try {
+                Import-Module WebAdministration -ErrorAction SilentlyContinue
+                
+                # FTP 바인딩이 있는 모든 사이트의 SSL 플래그 검사
+                $Sites = Get-ChildItem -Path IIS:\Sites
+                $InsecureSites = @()
+
+                foreach ($Site in $Sites) {
+                    if ($Site.bindings.Collection.protocol -contains "ftp") {
+                        # sslFlags: 0(None), 1(Allow), 2(Require), 3(Require 128)
+                        $Val = Get-WebConfigurationProperty -Filter /system.applicationHost/sites/site[@name="$($Site.name)"]/ftpServer/security/ssl -Name sslFlags -PSPath IIS:\
+                        
+                        # SSL이 '필요(2)' 이상이 아니면 취약 목록에 추가
+                        if ($null -eq $Val.Value -or $Val.Value -lt 2) {
+                            $InsecureSites += $Site.name
+                        }
+                    }
+                }
+
+                if ($InsecureSites.Count -gt 0) {
+                    $script:RESULT[$CODE] = "취약"
+                    $script:DETAIL[$CODE] = "FTP 서비스가 구동 중이며, SSL 암호화가 강제되지 않은 사이트가 있습니다: $($InsecureSites -join ', ')"
+                } else {
+                    $script:RESULT[$CODE] = "양호"
+                    $script:DETAIL[$CODE] = "FTP 서비스가 구동 중이나, 모든 사이트에 SSL 암호화가 강제 설정되어 있습니다."
+                }
+
+            } catch {
+                # IIS 모듈 로드 실패 등 예외 발생 시
+                $script:RESULT[$CODE] = "체크필요"
+                $script:DETAIL[$CODE] = "FTP 서비스가 실행 중입니다. (IIS 설정 조회 실패로 SSL 적용 여부 수동 확인 필요)"
+            }
+        } else {
+            # WebAdministration 모듈이 없는 경우 (매우 드문 케이스)
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "FTP 서비스가 실행 중입니다. (SSL 강제 설정 여부를 확인할 수 없어 취약으로 간주)"
+        }
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-22. FTP 디렉토리 접근권한 설정
+# --------------------------------------------------------------------------------
+function W_22 {
+    $CODE = "W-22"; $script:NAME[$CODE] = "FTP 디렉토리 접근권한 설정"
+    
+    $FTP = Get-Service "ftpsvc" -ErrorAction SilentlyContinue
+
+    if ($FTP -and $FTP.Status -eq "Running") {
+        # FTP가 켜져 있다면, 홈 디렉터리에 'Everyone' 권한이 있는지 사람이 직접 봐야 함
+        # (IIS 설정마다 홈 디렉터리 위치가 다르므로 수동 점검이 정확함)
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "FTP 서비스가 실행 중입니다. FTP 홈 디렉터리의 'Everyone' 권한 여부를 수동 점검하세요."
+    } else {
+        # 서비스가 꺼져 있으면 양호
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "FTP 서비스가 실행 중이지 않아 점검이 필요 없습니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-23. 공유 서비스(FTP)에 대한 익명 접근 제한 (SMB 제외, FTP 전용)
+# --------------------------------------------------------------------------------
+function W_23 {
+    $CODE = "W-23"; $script:NAME[$CODE] = "공유 서비스(FTP)에 대한 익명 접근 제한"
+
+    # 1. FTP 서비스 실행 여부 확인
+    $FtpSvc = Get-Service "ftpsvc" -ErrorAction SilentlyContinue
+
+    if ($null -eq $FtpSvc -or $FtpSvc.Status -ne "Running") {
+        # FTP를 안 쓰면 익명 접근 걱정도 없으므로 양호
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "FTP 서비스를 사용하지 않습니다. (서비스 중지됨)"
+    } else {
+        # 2. FTP가 켜져 있다면, IIS 설정에서 '익명 인증'이 켜져 있는지 확인
+        if (Get-Module -ListAvailable -Name WebAdministration) {
+            try {
+                Import-Module WebAdministration -ErrorAction SilentlyContinue
+                
+                # FTP 전용 익명 인증 설정 경로: system.ftpServer/security/authentication/anonymousAuthentication
+                $AnonAuth = Get-WebConfigurationProperty -Filter /system.ftpServer/security/authentication/anonymousAuthentication -Name enabled -PSPath IIS:\ -ErrorAction SilentlyContinue
+                
+                # enabled가 True이면 '익명 인증 사용' 상태이므로 취약
+                if ($AnonAuth.Value -eq $true) {
+                    $script:RESULT[$CODE] = "취약"
+                    $script:DETAIL[$CODE] = "FTP 서비스가 실행 중이며, 익명(Anonymous) 접근이 허용되어 있습니다."
+                } else {
+                    $script:RESULT[$CODE] = "양호"
+                    $script:DETAIL[$CODE] = "FTP 서비스가 실행 중이나, 익명 접근이 차단되어 안전합니다."
+                }
+            } catch {
+                # 설정 조회 실패 시
+                $script:RESULT[$CODE] = "체크필요"
+                $script:DETAIL[$CODE] = "FTP 실행 중. (IIS 설정을 읽을 수 없어 익명 접근 여부 수동 확인 필요)"
+            }
+        } else {
+            # 모듈이 없어서 확인 불가능한 경우
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "FTP 실행 중. (IIS 관리 모듈 미설치로 설정 확인 불가, 취약으로 간주)"
+        }
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-24. FTP 접근 제어 설정 (IP 제한 여부 확인)
+# --------------------------------------------------------------------------------
+function W_24 {
+    $CODE = "W-24"; $script:NAME[$CODE] = "FTP 접근 제어 설정"
+    
+    # 1. FTP 서비스 실행 여부 확인
+    $FTP = Get-Service "ftpsvc" -ErrorAction SilentlyContinue
+
+    if ($null -eq $FTP -or $FTP.Status -ne "Running") {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "FTP 서비스가 실행 중이지 않아 점검이 필요 없습니다."
+    } else {
+        # 2. 서비스 실행 중 -> IIS 설정을 통해 IP 제한 설정 확인
+        if (Get-Module -ListAvailable -Name WebAdministration) {
+            try {
+                Import-Module WebAdministration -ErrorAction SilentlyContinue
+                
+                $Sites = Get-ChildItem -Path IIS:\Sites
+                $VulnSites = @()
+
+                foreach ($Site in $Sites) {
+                    if ($Site.bindings.Collection.protocol -contains "ftp") {
+                        # 'FTP IPv4 주소 및 도메인 제한' 설정 조회 (ipSecurity)
+                        # allowUnlisted: True(기본값, 모두 허용), False(모두 거부)
+                        $IpSec = Get-WebConfigurationProperty -Filter /system.ftpServer/security/ipSecurity -Name allowUnlisted -PSPath IIS:\ -Location $Site.name
+                        
+                        # [점검 기준] "지정되지 않은 클라이언트 거부(allowUnlisted=False)"가 설정되어야 양호
+                        # 값이 True이면 '모두 허용' 상태이므로 취약 (특정 IP만 거부하는 블랙리스트 방식일 수도 있으나, 화이트리스트 권장, 해당 내용은 체크 필요)
+                        
+                        if ($IpSec.Value -eq $true) {
+                            $VulnSites += "$($Site.name)(모두허용)"
+                        }
+                    }
+                }
+
+                if ($VulnSites.Count -gt 0) {
+                    $script:RESULT[$CODE] = "취약"
+                    $script:DETAIL[$CODE] = "FTP 접근 제어(IP 제한)가 설정되지 않은 사이트가 있습니다: $($VulnSites -join ', ')"
+                } else {
+                    $script:RESULT[$CODE] = "양호"
+                    $script:DETAIL[$CODE] = "모든 FTP 사이트에 대해 접근 제어(지정된 IP만 허용)가 설정되어 있습니다."
+                }
+
+            } catch {
+                $script:RESULT[$CODE] = "체크필요"
+                $script:DETAIL[$CODE] = "FTP 실행 중. IIS 설정 조회 실패로 IP 제한 여부를 확인할 수 없습니다."
+            }
+        } else {
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "FTP 실행 중. (접근 제어 설정 여부 스크립트 확인 불가)"
+        }
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+
+# --------------------------------------------------------------------------------
+# W-25. DNS Zone Transfer 설정 (영역 전송 제한 확인)
+# --------------------------------------------------------------------------------
+function W_25 {
+    $CODE = "W-25"; $script:NAME[$CODE] = "DNS Zone Transfer 설정"
+    
+    # 1. DNS 서비스(DNS Server) 실행 여부 확인
+    $DnsSvc = Get-Service "DNS" -ErrorAction SilentlyContinue
+
+    if ($null -eq $DnsSvc -or $DnsSvc.Status -ne "Running") {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "DNS 서비스를 사용하지 않습니다. (서비스 중지됨)"
+    } else {
+        # 2. 서비스 실행 중 -> 설정 확인 필요
+        # (A) PowerShell DNS 모듈 사용 시도 (가장 정확함)
+        if (Get-Command Get-DnsServerZone -ErrorAction SilentlyContinue) {
+            try {
+                $Zones = Get-DnsServerZone
+                $VulnZones = @()
+
+                foreach ($Zone in $Zones) {
+                    # ZoneTransfer 속성 확인
+                    # "Any" 또는 "Unknown"(설정꼬임)인 경우 취약으로 간주
+                    # 안전한 값: "None", "NamedServers", "SpecificIp"
+                    if ($Zone.ZoneTransfer -eq "Any") {
+                        $VulnZones += "$($Zone.ZoneName)(모두허용)"
+                    }
+                }
+
+                if ($VulnZones.Count -gt 0) {
+                    $script:RESULT[$CODE] = "취약"
+                    $script:DETAIL[$CODE] = "Zone Transfer가 '모든 서버'로 허용된 영역이 있습니다: $($VulnZones -join ', ')"
+                } else {
+                    $script:RESULT[$CODE] = "양호"
+                    $script:DETAIL[$CODE] = "모든 DNS 영역의 Zone Transfer가 제한(차단 또는 특정서버 지정)되어 있습니다."
+                }
+            } catch {
+                # 모듈 에러 시 레지스트리 검사로 넘어감
+                $UseReg = $true
+            }
+        } else {
+            # 모듈 없으면 레지스트리 검사 사용
+            $UseReg = $true
+        }
+
+        # (B) 레지스트리 검사 (모듈 없을 때 Fallback)
+        if ($UseReg) {
+            $RegPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DNS Server\Zones"
+            if (Test-Path $RegPath) {
+                $Zones = Get-ChildItem $RegPath
+                $VulnZonesReg = @()
+                
+                foreach ($Z in $Zones) {
+                    $Secure = Get-ItemProperty -Path $Z.PSPath -Name "SecureSecondaries" -ErrorAction SilentlyContinue
+                    
+                    # SecureSecondaries 값 의미
+                    # 0: 모든 서버에 전송 허용 (취약) 
+                    # 1: Name Servers 탭의 서버만 허용 (양호)
+                    # 2: 지정한 IP만 허용 (양호)
+                    # 3: 전송 안 함 (양호)
+                    
+                    if ($Secure -and $Secure.SecureSecondaries -eq 0) {
+                        $VulnZonesReg += "$($Z.PSChildName)"
+                    }
+                }
+
+                if ($VulnZonesReg.Count -gt 0) {
+                    $script:RESULT[$CODE] = "취약"
+                    $script:DETAIL[$CODE] = "Zone Transfer가 '모두 허용(0)'으로 설정된 영역이 있습니다: $($VulnZonesReg -join ', ')"
+                } else {
+                    $script:RESULT[$CODE] = "양호"
+                    $script:DETAIL[$CODE] = "DNS 서비스 실행 중. (레지스트리 점검 결과: 영역 전송 제한됨)"
+                }
+            } else {
+                $script:RESULT[$CODE] = "체크필요"
+                $script:DETAIL[$CODE] = "DNS 서비스 실행 중이나, 설정을 확인할 수 없습니다. (권한 부족 또는 모듈 미설치)"
+            }
+        }
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-26. RDS(Remote Data Services) 제거
+# --------------------------------------------------------------------------------
+function W_26 {
+    $CODE = "W-26"; $script:NAME[$CODE] = "RDS(Remote Data Services) 제거"
+    
+    # 1. OS 버전 확인 (이미지 기준: Windows 2008 이상이면 양호)
+    # RDS는 아주 오래된 취약점으로, 2008 이후 버전에서는 구조적으로 해결되었거나 해당 기능이 제거됨
+    $OS = Get-CimInstance Win32_OperatingSystem
+    [version]$OSVer = $OS.Version
+    
+    # Major 버전 6.0이 Windows Server 2008입니다. 6 이상이면 양호.
+    if ($OSVer.Major -ge 6) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "Windows 2008 이상 버전입니다 (현재: $($OS.Caption)). RDS 취약점에 해당하지 않습니다."
+        print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+        return
+    }
+
+    # 2. IIS 서비스 사용 여부 확인 (IIS 안 쓰면 양호)
+    $IIS = Get-Service "W3SVC" -ErrorAction SilentlyContinue
+    if ($null -eq $IIS -or $IIS.Status -ne "Running") {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "IIS 서비스(W3SVC)를 사용하지 않습니다."
+        print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+        return
+    }
+
+    # 3. 레지스트리 키 존재 여부 확인 (구형 OS인 경우)
+    # 경로: HKLM:\SYSTEM\CurrentControlSet\Services\W3SVC\Parameters\ADCLaunch
+    $RegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\W3SVC\Parameters\ADCLaunch"
+    
+    if (-not (Test-Path $RegPath)) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "RDS 관련 레지스트리 키(ADCLaunch)가 존재하지 않습니다."
+    } else {
+        # 키가 존재하면 취약 (하위 키인 RDSServer.DataFactory 등이 존재하는지까지 봐도 되지만, 보통 키 자체가 없어야 안전)
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "RDS 관련 레지스트리(ADCLaunch)가 존재합니다. 불필요 시 삭제해야 합니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-27. 최신 Windows OS Build 버전 적용
+# --------------------------------------------------------------------------------
+function W_27 {
+    $CODE = "W-27"; $script:NAME[$CODE] = "최신 Windows OS Build 버전 적용"
+    
+    # 현재 OS 버전 및 빌드 번호 조회
+    $OS = Get-CimInstance Win32_OperatingSystem
+    $CurrentVer = $OS.Caption      # 예: Microsoft Windows Server 2019 Standard
+    $BuildNum = $OS.BuildNumber    # 예: 17763
+    
+    $script:RESULT[$CODE] = "체크필요"
+    $script:DETAIL[$CODE] = "현재 버전: $CurrentVer (Build $BuildNum)"
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-28. 터미널 서비스 암호화 수준 설정
+# --------------------------------------------------------------------------------
+function W_28 {
+    $CODE = "W-28"; $script:NAME[$CODE] = "터미널 서비스 암호화 수준 설정"
+    
+    # 1. 원격 데스크톱(RDP) 사용 여부 확인
+    # fDenyTSConnections -> 1: 차단(사용안함), 0: 허용(사용함)
+    $TSPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server"
+    $TSProp = Get-ItemProperty -Path $TSPath -Name "fDenyTSConnections" -ErrorAction SilentlyContinue
+
+    if ($TSProp -and $TSProp.fDenyTSConnections -eq 1) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "원격 데스크톱 서비스를 사용하지 않습니다."
+        print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+        return
+    }
+
+    # 2. 사용 중이라면 암호화 수준(MinEncryptionLevel) 확인
+    # 경로: HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp
+    # 값 설명: 1(Low), 2(Client Compatible/Medium), 3(High), 4(FIPS)
+    
+    $RDPPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+    $RDPProp = Get-ItemProperty -Path $RDPPath -Name "MinEncryptionLevel" -ErrorAction SilentlyContinue
+
+    # 값이 없으면 0으로 간주
+    $Level = if ($RDPProp -and $RDPProp.MinEncryptionLevel) { $RDPProp.MinEncryptionLevel } else { 0 }
+
+    # [판단 기준] 2(중간) 이상이면 양호
+    if ($Level -ge 2) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "암호화 수준이 '클라이언트 호환(2)' 이상으로 설정되어 있습니다. (현재값: $Level)"
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "암호화 수준이 낮거나 설정되어 있지 않습니다. (현재값: $Level, 기준: 2 이상)"
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-29. 불필요한 SNMP 서비스 구동 점검
+# --------------------------------------------------------------------------------
+function W_29 {
+    $CODE = "W-29"; $script:NAME[$CODE] = "불필요한 SNMP 서비스 구동 점검"
+    
+    # SNMP 서비스(Service Name: SNMP) 확인
+    $SNMP = Get-Service "SNMP" -ErrorAction SilentlyContinue
+
+    if ($null -eq $SNMP -or $SNMP.Status -ne "Running") {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "SNMP 서비스를 사용하지 않습니다."
+    } else {
+        # 실행 중인 경우: 실제로 필요한지 여부는 스크립트가 알 수 없으므로 '체크필요' 또는 '취약'
+        # 가이드라인상 "불필요 시 차단"이므로, 일단 켜져 있으면 관리자 확인을 유도
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "SNMP 서비스가 실행 중입니다. 불필요한 경우 서비스를 중지하세요."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-30. SNMP Community String 복잡성 설정
+# --------------------------------------------------------------------------------
+function W_30 {
+    $CODE = "W-30"; $script:NAME[$CODE] = "SNMP Community String 복잡성 설정"
+    
+    # 1. 서비스 사용 여부 확인
+    $SNMP = Get-Service "SNMP" -ErrorAction SilentlyContinue
+    if ($null -eq $SNMP -or $SNMP.Status -ne "Running") {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "SNMP 서비스를 사용하지 않아 점검이 필요 없습니다."
+        print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+        return
+    }
+
+    # 2. 레지스트리에서 Community String 확인
+    # 경로: HKLM:\SYSTEM\CurrentControlSet\Services\SNMP\Parameters\ValidCommunities
+    # 값의 이름(Name)이 Community String입니다. (데이터는 권한)
+    $RegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\SNMP\Parameters\ValidCommunities"
+    $Reg = Get-ItemProperty -Path $RegPath -ErrorAction SilentlyContinue
+
+    if ($Reg) {
+        # 기본값(public, private) 포함 여부 검사 (대소문자 구분 없이)
+        # PSObject의 속성 이름들(Community String들)을 가져옴
+        $Communities = $Reg.PSObject.Properties.Name | Where-Object { $_ -notin "PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider" }
+        
+        $WeakStrings = @()
+        foreach ($Comm in $Communities) {
+            if ($Comm -match "^public$" -or $Comm -match "^private$") {
+                $WeakStrings += $Comm
+            }
+        }
+
+        if ($WeakStrings.Count -gt 0) {
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "기본 Community String(public/private)이 설정되어 있습니다: $($WeakStrings -join ', ')"
+        } else {
+            $script:RESULT[$CODE] = "양호"
+            $script:DETAIL[$CODE] = "SNMP 서비스 사용 중이나, 기본값(public/private)을 사용하지 않고 있습니다."
+        }
+    } else {
+        # 레지스트리 키가 없으면 설정된 커뮤니티가 없는 것이므로(접속 불가) 양호 간주 or 확인필요
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "설정된 Community String이 없습니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-31. SNMP Access Control 설정 (접근 허용 호스트 제한)
+# --------------------------------------------------------------------------------
+function W_31 {
+    $CODE = "W-31"; $script:NAME[$CODE] = "SNMP Access Control 설정"
+    
+    # 1. 서비스 사용 여부 확인
+    $SNMP = Get-Service "SNMP" -ErrorAction SilentlyContinue
+    if ($null -eq $SNMP -or $SNMP.Status -ne "Running") {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "SNMP 서비스를 사용하지 않아 점검이 필요 없습니다."
+        print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+        return
+    }
+
+    # 2. 레지스트리에서 PermittedManagers 확인
+    # 경로: HKLM:\SYSTEM\CurrentControlSet\Services\SNMP\Parameters\PermittedManagers
+    # 이 키에 1, 2, 3... 등의 이름으로 허용된 IP가 등록됩니다.
+    # 키가 비어있거나 없으면 "모든 호스트로부터 허용" 상태일 수 있음(취약)
+    
+    $RegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\SNMP\Parameters\PermittedManagers"
+    $Reg = Get-ItemProperty -Path $RegPath -ErrorAction SilentlyContinue
+
+    # 실제 등록된 매니저(IP) 개수 확인
+    # PS 기본 속성을 제외한 나머지 속성이 있는지 확인
+    $HasManagers = $false
+    if ($Reg) {
+        $Props = $Reg.PSObject.Properties.Name | Where-Object { $_ -notin "PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider" }
+        if ($Props.Count -gt 0) {
+            $HasManagers = $true
+        }
+    }
+
+    if ($HasManagers) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "SNMP 패킷 수신이 특정 호스트(IP)로 제한되어 있습니다."
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "SNMP 접근 제어(PermittedManagers)가 설정되지 않아 모든 호스트의 접속을 허용할 수 있습니다."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-32. DNS 서비스 구동 점검 (동적 업데이트 제한 확인)
+# --------------------------------------------------------------------------------
+function W_32 {
+    $CODE = "W-32"; $script:NAME[$CODE] = "DNS 서비스 구동 점검"
+    
+    # 1. DNS 서비스(DNS Server) 실행 여부 확인
+    $DnsSvc = Get-Service "DNS" -ErrorAction SilentlyContinue
+
+    if ($null -eq $DnsSvc -or $DnsSvc.Status -ne "Running") {
+        # DNS 서비스를 안 쓰면 당연히 안전 (양호)
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "DNS 서비스를 사용하지 않습니다. (서비스 중지됨)"
+    } else {
+        # 2. 서비스 실행 중 -> 동적 업데이트(Dynamic Update) 설정 확인
+        # 가이드 기준: "없음(None)"이어야 양호.
+        
+        $VulnZones = @()
+        $CheckDone = $false
+
+        # (A) PowerShell DNS 모듈 사용 (정확도 높음)
+        if (Get-Command Get-DnsServerZone -ErrorAction SilentlyContinue) {
+            try {
+                $Zones = Get-DnsServerZone
+                foreach ($Zone in $Zones) {
+                    # DynamicUpdate 속성: None(0), NonSecureAndSecure(1), Secure(2)
+                    # 기준에 따라 'None'이 아니면 모두 취약으로 판단
+                    if ($Zone.DynamicUpdate -ne "None") {
+                        $VulnZones += "$($Zone.ZoneName)($($Zone.DynamicUpdate))"
+                    }
+                }
+                $CheckDone = $true
+            } catch {
+                # 모듈 오류 시 레지스트리 검사로 진행
+                $CheckDone = $false
+            }
+        }
+
+        # (B) 레지스트리 검사 (모듈 실패 또는 미설치 시)
+        if (-not $CheckDone) {
+            $RegPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DNS Server\Zones"
+            if (Test-Path $RegPath) {
+                $Zones = Get-ChildItem $RegPath
+                foreach ($Z in $Zones) {
+                    $Prop = Get-ItemProperty -Path $Z.PSPath -Name "AllowUpdate" -ErrorAction SilentlyContinue
+                    # AllowUpdate 값: 0(None), 1(NonSecure+Secure), 2(SecureOnly)
+                    # 0이 아니면 취약
+                    if ($Prop -and $Prop.AllowUpdate -ne 0) {
+                        $TypeStr = if ($Prop.AllowUpdate -eq 2) { "보안전용" } else { "허용" }
+                        $VulnZones += "$($Z.PSChildName)($TypeStr)"
+                    }
+                }
+            }
+        }
+
+        if ($VulnZones.Count -gt 0) {
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "동적 업데이트가 활성화된 영역이 있습니다: $($VulnZones -join ', ')"
+        } else {
+            $script:RESULT[$CODE] = "양호"
+            $script:DETAIL[$CODE] = "DNS 서비스 실행 중이나, 모든 영역의 동적 업데이트가 '없음(None)'으로 설정되어 안전합니다."
+        }
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-33. HTTP/FTP/SMTP 배너 차단
+# --------------------------------------------------------------------------------
+function W_33 {
+    $CODE = "W-33"; $script:NAME[$CODE] = "HTTP/FTP/SMTP 배너 차단"
+    
+    $VulnDetails = @()
+    $IsVuln = $false
+
+    # 1. FTP 서비스 점검 (IIS FTP)
+    $FtpSvc = Get-Service "ftpsvc" -ErrorAction SilentlyContinue
+    if ($FtpSvc -and $FtpSvc.Status -eq "Running") {
+        if (Get-Module -ListAvailable -Name WebAdministration) {
+            try {
+                Import-Module WebAdministration -ErrorAction SilentlyContinue
+                
+                # FTP 메시지 설정의 'suppressDefaultBanner' 값 확인 (True여야 배너 숨김)
+                # 경로: system.ftpServer/messages
+                $FtpMsg = Get-WebConfigurationProperty -Filter /system.ftpServer/messages -Name suppressDefaultBanner -PSPath IIS:\ -ErrorAction SilentlyContinue
+                
+                if ($FtpMsg.Value -eq $true) {
+                    # 양호: 배너 숨기기 설정됨
+                } else {
+                    $IsVuln = $true
+                    $VulnDetails += "FTP:기본배너노출(숨기기설정안됨)"
+                }
+            } catch {
+                $IsVuln = $true
+                $VulnDetails += "FTP:설정확인불가"
+            }
+        } else {
+            $IsVuln = $true
+            $VulnDetails += "FTP:서비스실행중(모듈미설치로설정미확인)"
+        }
+    }
+
+    # 2. SMTP 서비스 점검 (Legacy IIS 6.0 SMTP)
+    $SmtpSvc = Get-Service "SMTPSVC" -ErrorAction SilentlyContinue
+    if ($SmtpSvc -and $SmtpSvc.Status -eq "Running") {
+        # SMTP는 레거시 서비스라 스크립트로 배너 설정값(ConnectResponse) 확인이 까다로움(ADSI 필요)
+        # 서비스가 켜져 있으면 기본적으로 배너가 노출될 확률이 높으므로 '체크필요' 또는 '취약'으로 분류
+        $IsVuln = $true
+        $VulnDetails += "SMTP:서비스실행중(배너설정수동점검필요)"
+    }
+
+    # 3. HTTP 서비스 점검 (IIS 웹 서버)
+    $W3Svc = Get-Service "W3SVC" -ErrorAction SilentlyContinue
+    if ($W3Svc -and $W3Svc.Status -eq "Running") {
+        if (Get-Module -ListAvailable -Name WebAdministration) {
+            try {
+                # HTTP 응답 헤더 중 'X-Powered-By'가 존재하는지 확인
+                # 경로: system.webServer/httpProtocol/customHeaders
+                $Headers = Get-WebConfigurationProperty -Filter /system.webServer/httpProtocol/customHeaders -Name collection -PSPath IIS:\ -ErrorAction SilentlyContinue
+                
+                $HasXPoweredBy = $false
+                foreach ($H in $Headers) {
+                    if ($H.name -eq "X-Powered-By") {
+                        $HasXPoweredBy = $true
+                        break
+                    }
+                }
+
+                if ($HasXPoweredBy) {
+                    $IsVuln = $true
+                    $VulnDetails += "HTTP:X-Powered-By헤더노출"
+                }
+                
+                # 'Server' 헤더 차단(URL Rewrite) 여부는 스크립트 확인이 복잡하므로 
+                # X-Powered-By가 없으면 일단 양호로 보되, 상세 내용에 언급
+            } catch {
+                $IsVuln = $true
+                $VulnDetails += "HTTP:설정확인불가"
+            }
+        }
+    }
+
+    # 4. 결과 종합 판정
+    if ($IsVuln) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "배너 차단 미흡: " + ($VulnDetails -join ", ")
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "모든 서비스(HTTP/FTP/SMTP)가 중지되었거나 배너 차단 설정이 적용되었습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-34. Telnet 서비스 비활성화
+# --------------------------------------------------------------------------------
+function W_34 {
+    $CODE = "W-34"; $script:NAME[$CODE] = "Telnet 서비스 비활성화"
+    
+    # 1. Telnet 서비스 존재 및 구동 여부 확인
+    $Telnet = Get-Service "TlntSvr" -ErrorAction SilentlyContinue
+
+    if ($null -eq $Telnet) {
+        # 서비스가 아예 설치되지 않음 (가장 안전)
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "Telnet 서비스가 설치되어 있지 않습니다."
+    } elseif ($Telnet.Status -ne "Running") {
+        # 설치는 됐으나 꺼져 있음
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "Telnet 서비스가 중지되어 있습니다."
+    } else {
+        # 2. 서비스 실행 중 -> NTLM 인증 설정 확인
+        # 레지스트리: HKLM:\SOFTWARE\Microsoft\TelnetServer\1.0 -> NTLM 값
+        $RegPath = "HKLM:\SOFTWARE\Microsoft\TelnetServer\1.0"
+        $Reg = Get-ItemProperty -Path $RegPath -Name "NTLM" -ErrorAction SilentlyContinue
+        
+        # NTLM 값이 2 이상이면 NTLM Only(양호)로 간주하는 경우가 많으나,
+        # 가이드라인은 원칙적으로 서비스 비활성화를 권장하므로 실행 중이면 '취약' 경고를 띄우는 것이 안전함.
+        if ($Reg -and $Reg.NTLM -ge 2) {
+            $script:RESULT[$CODE] = "체크필요"
+            $script:DETAIL[$CODE] = "Telnet이 실행 중입니다. (NTLM 인증 설정됨: $($Reg.NTLM), 불필요 시 중지 권장)"
+        } else {
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "Telnet 서비스가 실행 중이며, 취약한 인증 방식이 사용될 수 있습니다."
+        }
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-35. 불필요한 ODBC/OLE-DB 데이터 소스와 드라이브 제거
+# --------------------------------------------------------------------------------
+function W_35 {
+    $CODE = "W-35"; $script:NAME[$CODE] = "불필요한 ODBC/OLE-DB 데이터 소스/드라이브 제거"
+    
+    # 시스템 DSN 목록 확인 (레지스트리)
+    # 64비트 및 32비트(WOW6432Node) 경로 모두 확인
+    $Paths = @(
+        "HKLM:\SOFTWARE\ODBC\ODBC.INI\ODBC Data Sources",
+        "HKLM:\SOFTWARE\WOW6432Node\ODBC\ODBC.INI\ODBC Data Sources"
+    )
+    
+    $DSNCount = 0
+    foreach ($P in $Paths) {
+        if (Test-Path $P) {
+            $DSN = Get-Item $P -ErrorAction SilentlyContinue
+            if ($DSN) {
+                # 기본 속성 외의 값(등록된 DSN) 개수 카운트
+                $Count = ($DSN.Property | Where-Object { $_ -notin "PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider" }).Count
+                $DSNCount += $Count
+            }
+        }
+    }
+
+    if ($DSNCount -eq 0) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "불필요한 시스템 DSN이 발견되지 않았습니다. (등록된 소스 없음)"
+    } else {
+        # 등록된 게 있으면 실제로 쓰는지 스크립트는 모름 -> 관리자 확인 필요
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "시스템 DSN이 $DSNCount개 등록되어 있습니다. 불필요한 항목인지 수동 점검하세요."
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-36. 원격터미널 접속 타임아웃 설정
+# --------------------------------------------------------------------------------
+function W_36 {
+    $CODE = "W-36"; $script:NAME[$CODE] = "원격터미널 접속 타임아웃 설정"
+    
+    # 1. RDP 서비스 미사용 시 양호
+    $TSProp = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction SilentlyContinue
+    if ($TSProp -and $TSProp.fDenyTSConnections -eq 1) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "원격 데스크톱 서비스를 사용하지 않습니다."
+        print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+        return
+    }
+
+    # 2. 타임아웃 설정 확인 (MaxIdleTime)
+    # 우선순위: 그룹 정책(Policies) > 기본 RDP 설정(RDP-Tcp)
+    # 단위: 밀리초(ms). 30분 = 1,800,000 ms
+    
+    $LimitValues = @()
+    
+
+    # (A) 정책 설정 확인
+    $PolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+    $Policy = Get-ItemProperty -Path $PolicyPath -Name "MaxIdleTime" -ErrorAction SilentlyContinue
+    if ($Policy -and $Policy.MaxIdleTime) { $LimitValues += $Policy.MaxIdleTime }
+
+    # (B) RDP-Tcp 설정 확인
+    $RdpPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+    $Rdp = Get-ItemProperty -Path $RdpPath -Name "MaxIdleTime" -ErrorAction SilentlyContinue
+    if ($Rdp -and $Rdp.MaxIdleTime) { $LimitValues += $Rdp.MaxIdleTime }
+
+    # 유효한 설정값이 하나라도 있는지 확인
+    $IsSafe = $false
+    $CurrentSetting = "설정없음"
+
+    foreach ($Val in $LimitValues) {
+        if ($Val -gt 0 -and $Val -le 1800000) { # 0초 초과 ~ 30분 이하
+            $IsSafe = $true
+            $CurrentSetting = "$($Val / 60000)분"
+            break
+        } elseif ($Val -gt 1800000) {
+            $CurrentSetting = "$($Val / 60000)분(30분초과)"
+        }
+    }
+
+    if ($IsSafe) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "유휴 세션 제한 시간이 30분 이하로 설정되어 있습니다. ($CurrentSetting)"
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "유휴 세션 제한(Timeout)이 설정되지 않았거나 30분을 초과합니다. (현재: $CurrentSetting)"
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+
+# --------------------------------------------------------------------------------
+# W-37. 예약된 작업에 의심스러운 명령이 등록되어 있는지 점검
+# --------------------------------------------------------------------------------
+function W_37 {
+    $CODE = "W-37"; $script:NAME[$CODE] = "예약된 작업 의심 명령어 등록 점검"
+    
+    # 스크립트로 '의심스러운' 기준을 정의하기 어려우므로 목록 확인 유도
+    $script:RESULT[$CODE] = "체크필요"
+    $script:DETAIL[$CODE] = "[수동 점검 필요] 작업 스케줄러(taskschd.msc)에서 불필요하거나 의심스러운 작업이 없는지 확인하세요."
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+
+# --------------------------------------------------------------------------------
+# W-38. 주기적 보안 패치 및 벤더 권고사항 적용
+# --------------------------------------------------------------------------------
+function W_38 {
+    $CODE = "W-38"; $script:NAME[$CODE] = "주기적 보안 패치 및 벤더 권고사항 적용"
+    
+    # 최신 패치 여부는 외부 인터넷 연결 및 MS 카탈로그 비교가 필요하므로 자동화 불가
+    # W-27(최신 빌드 확인)과 유사하게 관리자 확인 유도
+    $script:RESULT[$CODE] = "체크필요"
+    $script:DETAIL[$CODE] = "[수동 점검 필요] Windows Update를 통해 최신 보안 패치가 적용되었는지 확인하세요."
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-39. 백신 프로그램 업데이트
+# --------------------------------------------------------------------------------
+function W_39 {
+    $CODE = "W-39"; $script:NAME[$CODE] = "백신 프로그램 업데이트"
+    
+    # 백신 종류(V3, Alyac, McAfee 등)가 다양하고, 최신 엔진 버전 정보를 
+    # 외부 인터넷 연결 없이 스크립트만으로 판단하기 어려우므로 수동 점검 유도
+    $script:RESULT[$CODE] = "체크필요"
+    $script:DETAIL[$CODE] = "[수동 점검 필요] 설치된 백신 프로그램의 엔진 버전이 최신인지, 실시간 감시가 켜져 있는지 확인하세요."
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-40. 정책에 따른 시스템 로깅 설정
+# --------------------------------------------------------------------------------
+function W_40 {
+    $CODE = "W-40"; $script:NAME[$CODE] = "정책에 따른 시스템 로깅 설정"
+    
+    # auditpol 명령어를 사용하여 현재 감사 정책 상태 조회
+    # CSV 형태로 가져와서 분석 (성공/실패 여부 확인)
+    # 주요 점검 항목: 계정 관리, 로그인 이벤트, 계정 로그인, 권한 사용, 정책 변경 등
+    
+    $AuditVuln = @()
+    
+    # auditpol이 없는 경우(드물지만) 예외 처리
+    if (-not (Get-Command "auditpol.exe" -ErrorAction SilentlyContinue)) {
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "auditpol 명령어를 찾을 수 없어 점검할 수 없습니다."
+        print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+        return
+    }
+
+    # CSV 포맷으로 감사 정책 가져오기 (/r)
+    # 한글 윈도우: "감사 안 함", "성공", "실패", "성공 및 실패"
+    # 영문 윈도우: "No Auditing", "Success", "Failure", "Success and Failure"
+    try {
+        $RawPolicy = auditpol /get /category:* /r | ConvertFrom-Csv
+        
+        # 점검할 주요 카테고리 (Subcategory GUID 또는 이름 매칭)
+        # 이름 매칭은 언어별로 다르므로 주의 필요하나, 여기서는 "감사 안 함(No Auditing)" 상태인지만 체크하여 범용성 확보
+        
+        foreach ($Item in $RawPolicy) {
+            # 주요 보안 카테고리 키워드 (한/영)
+            $TargetCategories = "Account Management", "계정 관리", "Logon", "로그온", "Privilege Use", "권한 사용", "Policy Change", "정책 변경"
+            
+            # Subcategory 이름이 주요 대상에 포함되는지 확인
+            $IsTarget = $false
+            foreach ($Cat in $TargetCategories) {
+                if ($Item.Subcategory -match $Cat) { $IsTarget = $true; break }
+            }
+
+            if ($IsTarget) {
+                # 설정값(Inclusion Setting) 확인
+                # "No Auditing" 또는 "감사 안 함" 이면 취약
+                if ($Item."Inclusion Setting" -match "No Auditing" -or $Item."Inclusion Setting" -match "감사 안 함") {
+                    $AuditVuln += "$($Item.Subcategory)"
+                }
+            }
+        }
+
+        if ($AuditVuln.Count -gt 0) {
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "주요 감사 정책이 설정되지 않았습니다: $($AuditVuln -join ', ')"
+        } else {
+            $script:RESULT[$CODE] = "양호"
+            $script:DETAIL[$CODE] = "주요 이벤트(로그온, 계정관리, 정책변경 등)에 대한 감사 로깅이 활성화되어 있습니다."
+        }
+    } catch {
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "감사 정책을 조회하는 중 오류가 발생했습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-41. NTP 및 시각 동기화 설정
+# --------------------------------------------------------------------------------
+function W_41 {
+    $CODE = "W-41"; $script:NAME[$CODE] = "NTP 및 시각 동기화 설정"
+    
+    # 1. Windows Time 서비스(W32Time) 상태 확인
+    $TimeSvc = Get-Service "W32Time" -ErrorAction SilentlyContinue
+    
+    if ($null -eq $TimeSvc -or $TimeSvc.Status -ne "Running") {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "Windows Time 서비스(W32Time)가 실행 중이지 않습니다."
+    } else {
+        # 2. 레지스트리 설정 확인 (NTP 서버 설정 여부)
+        # 경로: HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters
+        $RegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters"
+        $Reg = Get-ItemProperty -Path $RegPath -ErrorAction SilentlyContinue
+        
+        # Type: NTP(동기화 함) vs NoSync(안함)
+        # NtpServer: 서버 주소 존재 여부
+        if ($Reg -and $Reg.Type -ne "NoSync" -and -not [string]::IsNullOrWhiteSpace($Reg.NtpServer)) {
+            $script:RESULT[$CODE] = "양호"
+            $script:DETAIL[$CODE] = "NTP 서비스가 실행 중이며, 동기화 서버가 설정되어 있습니다. (Type: $($Reg.Type))"
+        } else {
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "NTP 서비스는 켜져 있으나, 동기화 설정(NtpServer/Type)이 미흡합니다."
+        }
+    }
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-42. 이벤트 로그 관리 설정 (로그 크기 점검)
+# --------------------------------------------------------------------------------
+function W_42 {
+    $CODE = "W-42"; $script:NAME[$CODE] = "이벤트 로그 관리 설정"
+    
+    # 점검 대상 로그: Application, Security, System
+    # 기준: 최대 크기 10,240KB (10MB) 이상
+    
+    $LogNames = "Application", "Security", "System"
+    $VulnLogs = @()
+    $MinSizeKB = 10240  # 10MB
+
+    foreach ($Name in $LogNames) {
+        # 레지스트리에서 MaxSize 값 확인 (단위: Byte)
+        $Path = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\$Name"
+        $Prop = Get-ItemProperty -Path $Path -Name "MaxSize" -ErrorAction SilentlyContinue
+        
+        if ($Prop) {
+            $SizeKB = $Prop.MaxSize / 1024
+            if ($SizeKB -lt $MinSizeKB) {
+                $VulnLogs += "$Name($([math]::Round($SizeKB))KB)"
+            }
+        } else {
+            $VulnLogs += "$Name(설정없음)"
+        }
+    }
+
+    if ($VulnLogs.Count -gt 0) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "로그 파일 크기가 권장(10,240KB) 미만입니다: $($VulnLogs -join ', ')"
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "주요 이벤트 로그(App, Sec, Sys)의 최대 크기가 10MB 이상으로 설정되어 있습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-43. 이벤트 로그 파일 접근 통제 설정
+# --------------------------------------------------------------------------------
+function W_43 {
+    $CODE = "W-43"; $script:NAME[$CODE] = "이벤트 로그 파일 접근 통제 설정"
+    
+    # 점검 대상 경로:
+    # 1. 최신 윈도우(2008 이상): C:\Windows\System32\winevt\Logs
+    # 2. 레거시/설정 경로: C:\Windows\System32\config
+    
+    $TargetPaths = @(
+        "$Env:SystemRoot\System32\winevt\Logs",
+        "$Env:SystemRoot\System32\config"
+    )
+    
+    $VulnPaths = @()
+    
+    foreach ($Path in $TargetPaths) {
+        if (Test-Path $Path) {
+            try {
+                $Acl = Get-Acl -Path $Path -ErrorAction SilentlyContinue
+                if ($Acl) {
+                    # 'Everyone' 권한이 포함되어 있는지 확인 (SID: S-1-1-0)
+                    $HasEveryone = $Acl.Access | Where-Object { 
+                        $_.IdentityReference -match "Everyone" -or $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq "S-1-1-0"
+                    }
+                    
+                    if ($HasEveryone) {
+                        $VulnPaths += $Path
+                    }
+                }
+            } catch {
+                # 권한 문제로 읽지 못하는 경우 건너뜀
+            }
+        }
+    }
+
+    if ($VulnPaths.Count -gt 0) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "로그 디렉터리에 'Everyone' 권한이 설정되어 있습니다: $($VulnPaths -join ', ')"
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "주요 로그 디렉터리에 'Everyone' 접근 권한이 존재하지 않습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-44. 원격으로 액세스할 수 있는 레지스트리 경로 (Remote Registry 서비스)
+# --------------------------------------------------------------------------------
+function W_44 {
+    $CODE = "W-44"; $script:NAME[$CODE] = "원격으로 액세스할 수 있는 레지스트리 경로"
+    
+    # RemoteRegistry 서비스 상태 확인
+    $Svc = Get-Service "RemoteRegistry" -ErrorAction SilentlyContinue
+    
+    if ($null -eq $Svc) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "Remote Registry 서비스가 설치되어 있지 않습니다."
+    } elseif ($Svc.Status -eq "Running") {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "Remote Registry 서비스가 실행 중입니다. (서비스 중지 필요)"
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "Remote Registry 서비스가 중지되어 있습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-45. 백신 프로그램 설치
+# --------------------------------------------------------------------------------
+function W_45 {
+    $CODE = "W-45"; $script:NAME[$CODE] = "백신 프로그램 설치"
+    
+    # 자동 판단하기 어려우므로 수동 점검 유도
+
+    $script:RESULT[$CODE] = "체크필요"
+    $script:DETAIL[$CODE] = "[수동 점검 필요] V3, Alyac, McAfee 등 백신 프로그램 설치 여부를 확인하세요."
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-46. SAM 파일 접근 통제 설정
+# --------------------------------------------------------------------------------
+function W_46 {
+    $CODE = "W-46"; $script:NAME[$CODE] = "SAM 파일 접근 통제 설정"
+    
+    # SAM 파일 경로: C:\Windows\System32\config\SAM
+    $SamPath = "$Env:SystemRoot\System32\config\SAM"
+    
+    if (Test-Path $SamPath) {
+        try {
+            $Acl = Get-Acl -Path $SamPath -ErrorAction SilentlyContinue
+            
+            # 허용된 그룹: Administrators(S-1-5-32-544), SYSTEM(S-1-5-18)
+            # 이 외의 계정이 있으면 취약으로 간주 (가이드라인: Admin, System 그룹만 권한 설정)
+            
+            $VulnAccounts = @()
+            
+            foreach ($Access in $Acl.Access) {
+                $SID = $Access.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+                
+                # 허용된 SID 리스트 (Admin, SYSTEM)
+                if ($SID -ne "S-1-5-32-544" -and $SID -ne "S-1-5-18") {
+                    $VulnAccounts += $Access.IdentityReference.ToString()
+                }
+            }
+
+            if ($VulnAccounts.Count -gt 0) {
+                $script:RESULT[$CODE] = "취약"
+                $script:DETAIL[$CODE] = "SAM 파일에 불필요한 계정 권한이 설정되어 있습니다: $($VulnAccounts -join ', ')"
+            } else {
+                $script:RESULT[$CODE] = "양호"
+                $script:DETAIL[$CODE] = "SAM 파일 접근 권한이 관리자(Administrator)와 시스템(SYSTEM)으로 제한되어 있습니다."
+            }
+        } catch {
+            $script:RESULT[$CODE] = "체크필요"
+            $script:DETAIL[$CODE] = "SAM 파일 권한을 읽을 수 없습니다. (관리자 권한 필요)"
+        }
+    } else {
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "SAM 파일을 찾을 수 없습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-47. 화면 보호기 설정
+# --------------------------------------------------------------------------------
+function W_47 {
+    $CODE = "W-47"; $script:NAME[$CODE] = "화면 보호기 설정"
+    
+    # 주의: 화면 보호기는 '현재 로그인한 사용자(HKCU)' 기준입니다.
+    # 스크립트를 실행하는 계정의 설정이 점검되므로, 실제 운영자와 다를 수 있습니다.
+    
+    $Path = "HKCU:\Control Panel\Desktop"
+    $Prop = Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
+    
+    if ($Prop) {
+        $Active  = $Prop.ScreenSaveActive   # 1: 활성, 0: 비활성
+        $Secure  = $Prop.ScreenSaverIsSecure # 1: 암호 사용, 0: 미사용
+        $Timeout = $Prop.ScreenSaveTimeOut  # 초 단위 (600초 = 10분)
+
+        # 값이 없는 경우 기본값 처리 (일반적으로 없으면 비활성)
+        if ($null -eq $Active) { $Active = 0 }
+        if ($null -eq $Secure) { $Secure = 0 }
+        if ($null -eq $Timeout) { $Timeout = 99999 } 
+
+        # [판단 기준]
+        # 1. 활성화(1) 되어 있어야 함
+        # 2. 암호(1) 걸려 있어야 함
+        # 3. 시간(Timeout) <= 600 (10분)
+        
+        if ($Active -eq "1" -and $Secure -eq "1" -and $Timeout -le 600) {
+            $script:RESULT[$CODE] = "양호"
+            $script:DETAIL[$CODE] = "화면 보호기가 보안 기준(활성, 암호사용, 10분 이하)을 만족합니다."
+        } else {
+            $Reasons = @()
+            if ($Active -ne "1") { $Reasons += "미사용" }
+            if ($Secure -ne "1") { $Reasons += "암호미설정" }
+            if ($Timeout -gt 600) { $Reasons += "시간초과($([math]::Round($Timeout/60))분)" }
+            
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "화면 보호기 설정 미흡: " + ($Reasons -join ", ")
+        }
+    } else {
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "화면 보호기 설정을 읽을 수 없습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-48. 로그온하지 않고 시스템 종료 허용 (개선된 버전)
+# --------------------------------------------------------------------------------
+function W_48 {
+    $CODE = "W-48"; $script:NAME[$CODE] = "로그온하지 않고 시스템 종료 허용"
+    
+    # 1. Winlogon 키 확인 (표준)
+    $Path1 = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+    $Reg1 = Get-ItemProperty -Path $Path1 -Name "ShutdownWithoutLogon" -ErrorAction SilentlyContinue
+    $Val1 = if ($Reg1) { $Reg1.ShutdownWithoutLogon } else { $null }
+
+    # 2. Policies 키 확인 (우선순위 높음)
+    $Path2 = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    $Reg2 = Get-ItemProperty -Path $Path2 -Name "ShutdownWithoutLogon" -ErrorAction SilentlyContinue
+    $Val2 = if ($Reg2) { $Reg2.ShutdownWithoutLogon } else { $null }
+
+    # 판정 로직
+    # 정책(Policies)에 값이 있으면 그게 우선. 없으면 Winlogon 값 확인.
+    # 둘 다 없으면? -> 서버는 기본 차단이지만, 명시적 설정이 없으므로 '취약' 또는 '확인필요'
+    
+    $FinalVal = $null
+    if ($null -ne $Val2) { 
+        $FinalVal = $Val2 
+    } elseif ($null -ne $Val1) { 
+        $FinalVal = $Val1 
+    }
+
+    if ($FinalVal -eq 0) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "로그온 화면에서의 시스템 종료가 차단되어 있습니다. (설정값: 0)"
+    } else {
+        # 값이 1이거나, 아예 없는 경우
+        $script:RESULT[$CODE] = "취약"
+        $CurrentStatus = if ($null -ne $FinalVal) { $FinalVal } else { "설정없음" }
+        $script:DETAIL[$CODE] = "로그온하지 않고 시스템 종료 허용 정책이 '사용(1)'이거나 설정되지 않았습니다. (현재: $CurrentStatus)"
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-49. 원격 시스템에서 강제로 시스템 종료
+# --------------------------------------------------------------------------------
+function W_49 {
+    $CODE = "W-49"; $script:NAME[$CODE] = "원격 시스템에서 강제로 시스템 종료"
+    
+    # 사용자 권한 할당(User Rights Assignment) 점검은 secedit을 이용합니다.
+    # 권한 이름: SeRemoteShutdownPrivilege
+    # 기준: Administrators 그룹만 존재해야 함
+    
+    $ExportFile = "$env:TEMP\secpol_w49.cfg"
+    secedit /export /cfg $ExportFile /areas USER_RIGHTS | Out-Null
+    
+    if (Test-Path $ExportFile) {
+        # 설정 파일에서 SeRemoteShutdownPrivilege 라인 찾기
+        $Line = Get-Content $ExportFile | Select-String "SeRemoteShutdownPrivilege"
+        
+        if ($Line) {
+            # 값 예시: SeRemoteShutdownPrivilege = *S-1-5-32-544,*S-1-5-32-545
+            # *S-1-5-32-544 (Administrators) 외의 SID가 있는지 확인
+            
+            $Values = ($Line.ToString().Split("=")[1]).Trim()
+            $SIDs = $Values.Split(",")
+            
+            $IsVuln = $false
+            $VulnAccounts = @()
+
+            foreach ($SID in $SIDs) {
+                # 관리자 그룹(S-1-5-32-544)이 아닌 것이 있으면 취약
+                if ($SID.Trim() -ne "*S-1-5-32-544") { 
+                    $IsVuln = $true
+                    $VulnAccounts += $SID.Trim()
+                }
+            }
+
+            if ($IsVuln) {
+                $script:RESULT[$CODE] = "취약"
+                $script:DETAIL[$CODE] = "Administrators 외에 다른 계정에 원격 종료 권한이 부여됨: $($VulnAccounts -join ', ')"
+            } else {
+                $script:RESULT[$CODE] = "양호"
+                $script:DETAIL[$CODE] = "원격 시스템 강제 종료 권한이 Administrators 그룹에만 할당되어 있습니다."
+            }
+        } else {
+            # 라인이 없으면 기본적으로 Admin에게만 있거나 권한이 없는 상태이므로 양호로 간주 가능하나
+            # 명시적 확인을 위해 체크필요 처리할 수도 있음. 보통은 양호.
+            $script:RESULT[$CODE] = "양호"
+            $script:DETAIL[$CODE] = "원격 종료 권한 설정이 기본값(또는 미설정)으로 안전합니다."
+        }
+        Remove-Item $ExportFile -ErrorAction SilentlyContinue
+    } else {
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "보안 정책을 내보낼 수 없어 점검하지 못했습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+
+# --------------------------------------------------------------------------------
+# W-50. 보안 감사를 로그 할 수 없는 경우 즉시 시스템 종료
+# --------------------------------------------------------------------------------
+function W_50 {
+    $CODE = "W-50"; $script:NAME[$CODE] = "보안 감사를 로그 할 수 없는 경우 즉시 시스템 종료"
+    
+    # 레지스트리: CrashOnAuditFail
+    # 0 (또는 값 없음): 사용 안 함 (양호) - 로그 꽉 차도 덮어쓰거나 멈추지 않음 (W-42 설정에 따름)
+    # 1: 사용 함 (취약) - 로그 못 남기면 블루스크린 뜨면서 서버 멈춤
+    
+    $Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    $Reg = Get-ItemProperty -Path $Path -Name "CrashOnAuditFail" -ErrorAction SilentlyContinue
+    
+    # 값이 없거나($null), 0이면 양호
+    if ($null -eq $Reg.CrashOnAuditFail -or $Reg.CrashOnAuditFail -eq 0) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "보안 감사 실패 시 시스템 즉시 종료 정책이 '사용 안 함'으로 설정되어 있습니다."
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "보안 감사 실패 시 시스템이 종료되도록 설정되어 있습니다 (CrashOnAuditFail=1)."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-51. SAM 계정과 공유의 익명 열거 허용 안 함
+# --------------------------------------------------------------------------------
+function W_51 {
+    $CODE = "W-51"; $script:NAME[$CODE] = "SAM 계정과 공유의 익명 열거 허용 안 함"
+    
+    # 레지스트리 경로: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+    # 1. RestrictAnonymous (SAM 계정과 공유의 익명 열거) -> 1 (또는 2) 이어야 양호
+    # 2. RestrictAnonymousSAM (SAM 계정의 익명 열거) -> 1 이어야 양호
+    
+    $Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    $P = Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
+    
+    $RA = if ($P -and $P.RestrictAnonymous) { $P.RestrictAnonymous } else { 0 }
+    $RAS = if ($P -and $P.RestrictAnonymousSAM) { $P.RestrictAnonymousSAM } else { 0 }
+    
+    # [판단 기준] RestrictAnonymous >= 1  AND  RestrictAnonymousSAM == 1
+    # (이미지 가이드에 따라 두 가지 정책을 모두 만족해야 양호로 판단)
+    
+    if ($RA -ge 1 -and $RAS -eq 1) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "익명 사용자의 SAM 계정 및 공유 열거가 차단되어 있습니다. (RA:$RA, RAS:$RAS)"
+    } else {
+        $Reason = @()
+        if ($RA -lt 1) { $Reason += "RestrictAnonymous 미흡($RA)" }
+        if ($RAS -ne 1) { $Reason += "RestrictAnonymousSAM 미흡($RAS)" }
+        
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "익명 열거 제한 설정이 미흡합니다: " + ($Reason -join ", ")
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-52. Autologon 기능 제어
+# --------------------------------------------------------------------------------
+function W_52 {
+    $CODE = "W-52"; $script:NAME[$CODE] = "Autologon 기능 제어"
+    
+    # 레지스트리: HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon
+    # 키: AutoAdminLogon
+    # 기준: 0 또는 값 없음 -> 양호 / 1 -> 취약
+    
+    $Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+    $Reg = Get-ItemProperty -Path $Path -Name "AutoAdminLogon" -ErrorAction SilentlyContinue
+    
+    if ($null -eq $Reg -or $null -eq $Reg.AutoAdminLogon -or $Reg.AutoAdminLogon -eq "0") {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "자동 로그온(AutoAdminLogon) 기능이 비활성화되어 있습니다."
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "자동 로그온이 활성화되어 있습니다 (AutoAdminLogon=1). 계정 정보 노출 위험이 있습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-53. 이동식 미디어 포맷 및 꺼내기 허용
+# --------------------------------------------------------------------------------
+function W_53 {
+    $CODE = "W-53"; $script:NAME[$CODE] = "이동식 미디어 포맷 및 꺼내기 허용"
+    
+    # 레지스트리: HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon
+    # 키: AllocateDASD
+    # 값 설명: 0(Administrators), 1(Admins+Power), 2(Admins+Interactive)
+    # * 값이 없는 경우(기본값)는 'Administrators'로 동작하므로 양호로 간주
+    
+    $Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+    $Reg = Get-ItemProperty -Path $Path -Name "AllocateDASD" -ErrorAction SilentlyContinue
+    
+    # 값이 없거나($null), "0"이면 양호
+    if ($null -eq $Reg -or $null -eq $Reg.AllocateDASD -or $Reg.AllocateDASD -eq "0") {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "이동식 미디어 포맷/꺼내기 권한이 관리자(Administrators)로 제한되어 있습니다."
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "관리자 외의 사용자도 이동식 미디어를 포맷/꺼낼 수 있습니다 (설정값: $($Reg.AllocateDASD))."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+
+# --------------------------------------------------------------------------------
+# W-54. DoS 공격 방어 레지스트리 설정
+# --------------------------------------------------------------------------------
+function W_54 {
+    $CODE = "W-54"; $script:NAME[$CODE] = "DoS 공격 방어 레지스트리 설정"
+    
+    # 레지스트리: HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters
+    # 점검 항목 4가지 (이미지 기준)
+    # 1. SynAttackProtect >= 1 (기본값 0 또는 없음 -> 취약)
+    # 2. EnableDeadGWDetect = 0 (기본값 1 -> 취약)
+    # 3. KeepAliveTime = 300,000 (5분) (기본값 7,200,000(2시간) -> 취약)
+    # 4. NoNameReleaseOnDemand = 1 (기본값 0 -> 취약)
+
+    $Path = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+    $Reg = Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
+    
+    if (-not $Reg) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "TCP/IP 파라미터 레지스트리 경로를 찾을 수 없습니다."
+        print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+        return
+    }
+
+    $VulnParams = @()
+
+    # 1. SynAttackProtect (없으면 0으로 간주)
+    $Syn = if ($Reg.SynAttackProtect) { $Reg.SynAttackProtect } else { 0 }
+    if ($Syn -lt 1) { $VulnParams += "SynAttackProtect($Syn)" }
+
+    # 2. EnableDeadGWDetect (없으면 1로 간주 - 윈도우 기본값)
+    $DeadGW = if ($Reg.EnableDeadGWDetect) { $Reg.EnableDeadGWDetect } else { 1 }
+    if ($DeadGW -ne 0) { $VulnParams += "EnableDeadGWDetect($DeadGW)" }
+
+    # 3. KeepAliveTime (없으면 7,200,000으로 간주)
+    $KeepAlive = if ($Reg.KeepAliveTime) { $Reg.KeepAliveTime } else { 7200000 }
+    # 가이드라인은 300,000(5분) 권장. 300,000 보다 크면 취약으로 판단
+    if ($KeepAlive -gt 300000) { $VulnParams += "KeepAliveTime($([math]::Round($KeepAlive/60000))분)" }
+
+    # 4. NoNameReleaseOnDemand (없으면 0으로 간주)
+    $NoName = if ($Reg.NoNameReleaseOnDemand) { $Reg.NoNameReleaseOnDemand } else { 0 }
+    if ($NoName -ne 1) { $VulnParams += "NoNameReleaseOnDemand($NoName)" }
+
+    if ($VulnParams.Count -gt 0) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "DoS 방어 설정 미흡: " + ($VulnParams -join ", ")
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "모든 DoS 방어 레지스트리 값이 보안 권고안대로 설정되어 있습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-55. 사용자가 프린터 드라이버를 설치할 수 없게 함
+# --------------------------------------------------------------------------------
+function W_55 {
+    $CODE = "W-55"; $script:NAME[$CODE] = "사용자가 프린터 드라이버를 설치할 수 없게 함"
+    
+    # 레지스트리: HKLM:\SYSTEM\CurrentControlSet\Control\Print\Providers\LanMan Print Services\Servers
+    # 키: AddPrinterDrivers
+    # 값: 0 (관리자만 설치 가능 - 양호) / 1 (사용자도 설치 가능 - 취약)
+    # * 해당 키가 없는 경우 윈도우 기본 보안 정책에 따라 관리자만 가능한 경우가 많으나, 
+    #   명시적으로 0으로 설정하는 것을 권장함.
+    
+    $Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Providers\LanMan Print Services\Servers"
+    $Reg = Get-ItemProperty -Path $Path -Name "AddPrinterDrivers" -ErrorAction SilentlyContinue
+    
+    if ($Reg -and $Reg.AddPrinterDrivers -eq 1) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "일반 사용자가 프린터 드라이버를 설치할 수 있도록 설정되어 있습니다 (AddPrinterDrivers=1)."
+    } else {
+        # 값이 0이거나 없으면(기본적으로 Admin 권한 필요) 양호로 간주
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "사용자의 프린터 드라이버 설치가 제한되어 있습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-56. SMB 세션 중단 관리 설정
+# --------------------------------------------------------------------------------
+function W_56 {
+    $CODE = "W-56"; $script:NAME[$CODE] = "SMB 세션 중단 관리 설정"
+    
+    # 경로: HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters
+    # 점검 항목 2가지 (AND 조건)
+    # 1. enableforcedlogoff = 1 (로그온 시간 만료 시 연결 끊기: 사용)
+    # 2. autodisconnect <= 15 (유휴 시간: 15분 이하)
+    
+    $Path = "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters"
+    $Reg = Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
+    
+    if ($Reg) {
+        $Forced = if ($Reg.enableforcedlogoff) { $Reg.enableforcedlogoff } else { 0 }
+        $AutoDisc = if ($Reg.autodisconnect) { $Reg.autodisconnect } else { 15 } # 없으면 기본값(15) 가정
+        
+        $IsVuln = $false
+        $Details = @()
+
+        # 1. 연결 끊기 설정 확인
+        if ($Forced -ne 1) {
+            $IsVuln = $true
+            $Details += "만료시연결끊기미사용"
+        }
+
+        # 2. 유휴 시간 확인 (0은 끊지 않음이므로 취약, 15분 초과 시 취약)
+        if ($AutoDisc -eq 0 -or $AutoDisc -gt 15) {
+            $IsVuln = $true
+            $Details += "유휴시간($($AutoDisc)분)"
+        }
+
+        if ($IsVuln) {
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "SMB 세션 설정 미흡: " + ($Details -join ", ")
+        } else {
+            $script:RESULT[$CODE] = "양호"
+            $script:DETAIL[$CODE] = "SMB 세션 만료 시 연결 차단 및 유휴 시간($($AutoDisc)분)이 적절히 설정되어 있습니다."
+        }
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "LanmanServer 파라미터 레지스트리를 확인할 수 없습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+# --------------------------------------------------------------------------------
+# W-57. 로그온 시 경고 메시지 설정 (디버깅 버전)
+# --------------------------------------------------------------------------------
+function W_57 {
+    $CODE = "W-57"; $script:NAME[$CODE] = "로그온 시 경고 메시지 설정"
+    
+    # 정책 경로(Policies) 값 읽기
+    $Path_Policy = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    $Reg_Policy = Get-ItemProperty -Path $Path_Policy -ErrorAction SilentlyContinue
+    
+    # 윈도우 기본 경로(Winlogon) 값 읽기
+    $Path_Win = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+    $Reg_Win = Get-ItemProperty -Path $Path_Win -ErrorAction SilentlyContinue
+
+    # 값 추출
+    $P_Title = if ($Reg_Policy) { $Reg_Policy.legalnoticecaption } else { $null }
+    $P_Text  = if ($Reg_Policy) { $Reg_Policy.legalnoticetext } else { $null }
+    
+    $W_Title = if ($Reg_Win) { $Reg_Win.LegalNoticeCaption } else { $null }
+    $W_Text  = if ($Reg_Win) { $Reg_Win.LegalNoticeText } else { $null }
+
+    #값 결정 로직
+    $Final_Title = if (-not [string]::IsNullOrWhiteSpace($P_Title)) { $P_Title } else { $W_Title }
+    $Final_Text  = if (-not [string]::IsNullOrWhiteSpace($P_Text)) { $P_Text } else { $W_Text }
+
+    # 결과 판정
+    if ((-not [string]::IsNullOrWhiteSpace($Final_Title)) -and (-not [string]::IsNullOrWhiteSpace($Final_Text))) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "로그온 경고 메시지 설정됨 (제목: $Final_Title)"
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "로그온 경고 메시지가 비어있습니다. (디버깅 정보 확인 필요)"
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-58. 사용자별 홈 디렉터리 권한 설정
+# --------------------------------------------------------------------------------
+function W_58 {
+    $CODE = "W-58"; $script:NAME[$CODE] = "사용자별 홈 디렉터리 권한 설정"
+    
+    # 점검 대상: C:\Users 하위 폴더들
+    # 제외 대상: Public, Default, All Users, Default User 등 공용 폴더
+    # 점검 내용: ACL에 'Everyone' 권한이 있는지 확인
+    
+    $BaseDir = "C:\Users"
+    $ExcludeList = @("Public", "Default", "All Users", "Default User", "Administrator") # Admin은 W-58 점검대상에서 보통 제외하거나 별도 관리
+    
+    $VulnDirs = @()
+    
+    if (Test-Path $BaseDir) {
+        $UserDirs = Get-ChildItem -Path $BaseDir -Directory | Where-Object { $_.Name -notin $ExcludeList }
+        
+        foreach ($Dir in $UserDirs) {
+            try {
+                $Acl = Get-Acl -Path $Dir.FullName -ErrorAction SilentlyContinue
+                
+                # Everyone (S-1-1-0) 권한 확인
+                $HasEveryone = $false
+                foreach ($Access in $Acl.Access) {
+                    if ($Access.IdentityReference -match "Everyone" -or $Access.IdentityReference.Value -eq "S-1-1-0") {
+                        $HasEveryone = $true
+                        break
+                    }
+                }
+                
+                if ($HasEveryone) {
+                    $VulnDirs += $Dir.Name
+                }
+            } catch {
+                # 권한 부족 등으로 읽지 못한 경우 패스
+            }
+        }
+
+        if ($VulnDirs.Count -gt 0) {
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "홈 디렉터리에 Everyone 권한이 포함된 계정이 있습니다: $($VulnDirs -join ', ')"
+        } else {
+            $script:RESULT[$CODE] = "양호"
+            $script:DETAIL[$CODE] = "사용자 홈 디렉터리에 Everyone 권한이 발견되지 않았습니다."
+        }
+    } else {
+        $script:RESULT[$CODE] = "체크필요"
+        $script:DETAIL[$CODE] = "C:\Users 디렉터리를 찾을 수 없습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-59. LAN Manager 인증 수준
+# --------------------------------------------------------------------------------
+function W_59 {
+    $CODE = "W-59"; $script:NAME[$CODE] = "LAN Manager 인증 수준"
+    
+    # 레지스트리 경로: HKLM:\SYSTEM\CurrentControlSet\Control\Lsa
+    # 키: LmCompatibilityLevel
+    # 값 설명:
+    # 0~2: LM 및 NTLM 전송 (취약)
+    # 3: NTLMv2만 전송 (양호)
+    # 4: NTLMv2만 전송, DC가 LM 거부 (양호)
+    # 5: NTLMv2만 전송, DC가 LM/NTLM 거부 (양호)
+    
+    $Path = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+    $Reg = Get-ItemProperty -Path $Path -Name "LmCompatibilityLevel" -ErrorAction SilentlyContinue
+    
+    if ($Reg -and $Reg.LmCompatibilityLevel -ge 3) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "LAN Manager 인증 수준이 NTLMv2 응답만 보내도록 설정되어 있습니다. (레벨: $($Reg.LmCompatibilityLevel))"
+    } else {
+        $CurrentLevel = if ($Reg) { $Reg.LmCompatibilityLevel } else { "설정없음(0)" }
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "LAN Manager 인증 수준이 미흡합니다. (현재값: $CurrentLevel, 권장: 3 이상)"
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-60. 보안 채널 데이터 디지털 암호화 또는 서명
+# --------------------------------------------------------------------------------
+function W_60 {
+    $CODE = "W-60"; $script:NAME[$CODE] = "보안 채널 데이터 디지털 암호화 또는 서명"
+    
+    # 레지스트리 경로: HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters
+    # 점검해야 할 3가지 항목 (모두 1이어야 양호)
+    # 1. RequireSignOrSeal: 암호화 또는 서명 (항상)
+    # 2. SealSecureChannel: 암호화 (가능한 경우)
+    # 3. SignSecureChannel: 서명 (가능한 경우)
+    
+    $Path = "HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters"
+    $Reg = Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
+    
+    if ($Reg) {
+        $Require = if ($Reg.RequireSignOrSeal) { $Reg.RequireSignOrSeal } else { 1 } # 기본값 1(최신 OS)
+        $Seal    = if ($Reg.SealSecureChannel) { $Reg.SealSecureChannel } else { 1 }
+        $Sign    = if ($Reg.SignSecureChannel) { $Reg.SignSecureChannel } else { 1 }
+        
+        if ($Require -eq 1 -and $Seal -eq 1 -and $Sign -eq 1) {
+            $script:RESULT[$CODE] = "양호"
+            $script:DETAIL[$CODE] = "보안 채널 데이터의 암호화 및 서명 정책이 모두 활성화되어 있습니다."
+        } else {
+            $Missing = @()
+            if ($Require -ne 1) { $Missing += "항상 암호화/서명 미설정" }
+            if ($Seal -ne 1) { $Missing += "암호화(가능시) 미설정" }
+            if ($Sign -ne 1) { $Missing += "서명(가능시) 미설정" }
+            
+            $script:RESULT[$CODE] = "취약"
+            $script:DETAIL[$CODE] = "보안 채널 설정 미흡: " + ($Missing -join ", ")
+        }
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "Netlogon 파라미터 레지스트리를 확인할 수 없습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-61. 파일 및 디렉토리 보호 (NTFS 파일 시스템 사용)
+# --------------------------------------------------------------------------------
+function W_61 {
+    $CODE = "W-61"; $script:NAME[$CODE] = "파일 및 디렉토리 보호 (NTFS 사용)"
+    
+    # 로컬 고정 디스크(DriveType=3)의 파일 시스템 확인
+    # FAT/FAT32가 있으면 취약
+    
+    $Drives = Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DriveType -eq 3 }
+    $VulnDrives = @()
+    
+    foreach ($D in $Drives) {
+        if ($D.FileSystem -ne "NTFS" -and $D.FileSystem -ne "ReFS") {
+            $VulnDrives += "$($D.DeviceID)($($D.FileSystem))"
+        }
+    }
+
+    if ($VulnDrives.Count -gt 0) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "NTFS가 아닌 파일 시스템을 사용하는 드라이브가 있습니다: $($VulnDrives -join ', ')"
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "모든 고정 디스크가 NTFS(또는 ReFS) 파일 시스템을 사용 중입니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+# --------------------------------------------------------------------------------
+# W-62. 시작 프로그램 목록 분석
+# --------------------------------------------------------------------------------
+function W_62 {
+    $CODE = "W-62"; $script:NAME[$CODE] = "시작 프로그램 목록 분석"
+    
+    # 시작 프로그램 목록을 추출하여 보여주고, 관리자가 판단하도록 '체크필요' 처리
+    # 점검 위치: 레지스트리 Run/RunOnce (HKLM, HKCU)
+    
+    $StartupItems = @()
+    
+    $RegPaths = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
+    )
+    
+    foreach ($P in $RegPaths) {
+        $Items = Get-ItemProperty -Path $P -ErrorAction SilentlyContinue
+        if ($Items) {
+            # 기본 속성 제외하고 실제 등록된 값만 추출
+            $Props = $Items.PSObject.Properties.Name | Where-Object { $_ -notin "PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider" }
+            foreach ($Key in $Props) {
+                $StartupItems += "$Key"
+            }
+        }
+    }
+    
+    # 시작 폴더 항목도 추가하려면 Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" 등을 쓸 수 있음
+    
+    $Count = $StartupItems.Count
+    
+    $script:RESULT[$CODE] = "체크필요"
+    if ($Count -gt 0) {
+        # 항목이 너무 많으면 일부만 표시
+        $DisplayItems = if ($Count -gt 5) { ($StartupItems[0..4] -join ", ") + " 등 총 $Count 개" } else { $StartupItems -join ", " }
+        $script:DETAIL[$CODE] = "[수동 점검 필요] 등록된 시작 프로그램: $DisplayItems. 불필요한 항목이 있는지 확인하세요."
+    } else {
+        $script:DETAIL[$CODE] = "[수동 점검 필요] 레지스트리에 등록된 시작 프로그램이 없습니다. (시작 폴더 등 추가 확인 권장)"
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-63. 도메인 컨트롤러-사용자의 시간 동기화 (Kerberos 허용 오차)
+# --------------------------------------------------------------------------------
+function W_63 {
+    $CODE = "W-63"; $script:NAME[$CODE] = "도메인 컨트롤러-사용자의 시간 동기화"
+    
+    # 이 설정은 'Kerberos 정책'으로, 도메인 컨트롤러(DC)이거나 도메인에 가입된 서버에서 중요합니다.
+    # secedit 명령어를 통해 보안 정책을 내보내서 확인합니다.
+    
+    $ExportFile = "$env:TEMP\secpol_w63.cfg"
+    secedit /export /cfg $ExportFile /areas SECURITYPOLICY | Out-Null
+    
+    $MaxClockSkew = 5 # 기본값 (분)
+    $Found = $false
+
+    if (Test-Path $ExportFile) {
+        $Content = Get-Content $ExportFile
+        foreach ($Line in $Content) {
+            # MaxClockSkew = 5 형태의 라인을 찾음
+            if ($Line -match "MaxClockSkew\s*=\s*(\d+)") {
+                $MaxClockSkew = [int]$matches[1]
+                $Found = $true
+                break
+            }
+        }
+        Remove-Item $ExportFile -ErrorAction SilentlyContinue
+    }
+
+    # 기준: 5분 이하 (양호)
+    if ($MaxClockSkew -le 5) {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "Kerberos 컴퓨터 시계 동기화 최대 허용 오차가 $($MaxClockSkew)분으로 설정되어 있습니다."
+    } else {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "시계 동기화 허용 오차가 5분을 초과합니다. (현재: $($MaxClockSkew)분)"
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+# --------------------------------------------------------------------------------
+# W-64. 윈도우 방화벽 설정
+# --------------------------------------------------------------------------------
+function W_64 {
+    $CODE = "W-64"; $script:NAME[$CODE] = "윈도우 방화벽 설정"
+    
+    # Windows 방화벽(Domain, Private, Public) 활성화 여부 확인
+    # PowerShell 모듈(NetSecurity) 사용 (Server 2012 이상)
+    # 구형 서버 호환성을 위해 netsh 명령어도 고려 가능하나, 최신 환경 기준 모듈 우선 사용
+    
+    $VulnProfiles = @()
+    
+    if (Get-Command Get-NetFirewallProfile -ErrorAction SilentlyContinue) {
+        $Profiles = Get-NetFirewallProfile
+        foreach ($P in $Profiles) {
+            if ($P.Enabled -ne $true -and $P.Enabled -ne "True") {
+                $VulnProfiles += "$($P.Name)(Off)"
+            }
+        }
+    } else {
+        # 모듈이 없는 구형 OS의 경우 netsh 사용
+        $NetshResult = netsh advfirewall show allprofiles state
+        # 결과 문자열 파싱이 필요하지만, 여기서는 단순화하여 'OFF'가 포함되면 취약 의심으로 처리하거나
+        # "State ON"이 3개 미만이면 취약으로 간주
+        
+        # 간단히 보수적으로 '체크필요'로 넘기지 않고, ON이 하나라도 없으면 잡도록 로직 구성
+        $OnCount = ($NetshResult | Select-String "ON").Count
+        if ($OnCount -lt 3) { # 프로필 3개(Domain, Private, Public) 모두 ON이어야 함
+             $VulnProfiles += "일부 프로필 Off 확인됨"
+        }
+    }
+
+    if ($VulnProfiles.Count -gt 0) {
+        $script:RESULT[$CODE] = "취약"
+        $script:DETAIL[$CODE] = "Windows 방화벽이 비활성화된 프로필이 있습니다: $($VulnProfiles -join ', ')"
+    } else {
+        $script:RESULT[$CODE] = "양호"
+        $script:DETAIL[$CODE] = "모든 네트워크 프로필(Domain, Private, Public)에 대해 방화벽이 활성화되어 있습니다."
+    }
+    
+    print_result $CODE $script:NAME[$CODE] $script:RESULT[$CODE] $script:DETAIL[$CODE]
+}
+
+
+
+
+# --------------------------------------------------------------------------------
+# [메인 실행 루프]
+# --------------------------------------------------------------------------------
+$CheckList = Get-ChildItem function:W_* | Select-Object -ExpandProperty Name | Sort-Object
+
+Write-Host "`nWindows 보안점검 시작 (W-01 ~ W-64)..."
+foreach ($task in $CheckList) {
+    if (Get-Command $task -ErrorAction SilentlyContinue) {
+        & $task
+    }
+}
+
+# 6. 최종 요약 및 CSV 저장
+$Total = $GoodCnt + $VulnCnt + $CheckCnt
+$Summary = @"
+
+점검 일자 : $(Get-Date)
+--------------------------------------------------------
+[ 점검 결과 요약 ]
+총 항목 수 : $Total
+양호      : $GoodCnt
+취약      : $VulnCnt
+체크필요  : $CheckCnt
+--------------------------------------------------------
+취약 항목 : $($VulnUnit -join ' ')
+체크 항목 : $($CheckUnit -join ' ')
+"@
+
+Write-Host $Summary
+$Summary | Out-File $ResultFile -Append -Encoding utf8
+$ResultsList | Export-Csv -Path $CsvFile -NoTypeInformation -Encoding utf8
+# 임시 파일 삭제
+Remove-Item $SecPolFile -ErrorAction SilentlyContinue
+Write-Host "`n점검 완료. 결과 파일: $ResultFile, $CsvFile"
+pause

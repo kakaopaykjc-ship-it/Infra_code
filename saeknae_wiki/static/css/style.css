@@ -1,0 +1,110 @@
+/* ── 공통 ── */
+body {
+  background: #f5f7fa;
+  color: #333;
+}
+
+.navbar {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.card {
+  border-radius: 10px;
+}
+
+/* ── 문서 본문 ── */
+.wiki-content {
+  line-height: 1.8;
+  font-size: 1rem;
+}
+
+.wiki-content h1, .wiki-content h2 {
+  border-bottom: 2px solid #e9ecef;
+  padding-bottom: .3rem;
+  margin-top: 1.5rem;
+}
+
+.wiki-content h3 { margin-top: 1.2rem; }
+
+.wiki-content code {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: .9em;
+  color: #c7254e;
+}
+
+.wiki-content pre {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border-radius: 8px;
+  padding: 1.2rem;
+  overflow-x: auto;
+}
+
+.wiki-content pre code {
+  background: none;
+  border: none;
+  color: inherit;
+  padding: 0;
+  font-size: .9em;
+}
+
+.wiki-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+
+.wiki-content th {
+  background: #e9ecef;
+  padding: .5rem .75rem;
+  border: 1px solid #dee2e6;
+  font-weight: 600;
+}
+
+.wiki-content td {
+  padding: .5rem .75rem;
+  border: 1px solid #dee2e6;
+}
+
+.wiki-content tr:hover td {
+  background: #f8f9fa;
+}
+
+.wiki-content blockquote {
+  border-left: 4px solid #0d6efd;
+  background: #f0f4ff;
+  padding: .75rem 1rem;
+  border-radius: 0 6px 6px 0;
+  margin: 1rem 0;
+  color: #555;
+}
+
+.wiki-content img {
+  max-width: 100%;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.1);
+}
+
+/* ── 드래그앤드롭 ── */
+#dropzone {
+  transition: background .2s;
+  border-color: #adb5bd !important;
+}
+
+#dropzone:hover, #dropzone.bg-light {
+  background: #e8f4ff !important;
+  border-color: #0d6efd !important;
+}
+
+/* ── EasyMDE 커스텀 ── */
+.EasyMDEContainer .CodeMirror {
+  border-radius: 0 0 8px 8px;
+  font-size: .95rem;
+}
+
+.editor-toolbar {
+  border-radius: 8px 8px 0 0;
+}

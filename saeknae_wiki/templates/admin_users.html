@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}사용자 관리 — 사내 Wiki{% endblock %}
+
+{% block content %}
+<h5 class="fw-bold mb-4"><i class="bi bi-people-fill me-2 text-primary"></i>사용자 관리</h5>
+
+<div class="row g-4">
+  <div class="col-lg-8">
+    <div class="card border-0 shadow-sm">
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>아이디</th>
+              <th>이름</th>
+              <th>역할</th>
+              <th>상태</th>
+              <th>가입일</th>
+              <th>작업</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for u in users %}
+            <tr>
+              <td><code>{{ u.username }}</code></td>
+              <td>{{ u.display_name }}</td>
+              <td>
+                {% if u.role == 'admin' %}
+                  <span class="badge bg-danger">관리자</span>
+                {% else %}
+                  <span class="badge bg-secondary">일반</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if u.is_active %}
+                  <span class="badge bg-success">활성</span>
+                {% else %}
+                  <span class="badge bg-warning text-dark">비활성</span>
+                {% endif %}
+              </td>
+              <td><small>{{ u.created_at.strftime('%Y-%m-%d') }}</small></td>
+              <td>
+                <div class="d-flex gap-1">
+                  {% if u.id != current_user.id %}
+                  <form action="{{ url_for('admin_user_toggle', user_id=u.id) }}" method="post">
+                    <button class="btn btn-sm {% if u.is_active %}btn-outline-warning{% else %}btn-outline-success{% endif %}">
+                      {% if u.is_active %}<i class="bi bi-pause-fill"></i>{% else %}<i class="bi bi-play-fill"></i>{% endif %}
+                    </button>
+                  </form>
+                  {% endif %}
+                  <button class="btn btn-sm btn-outline-secondary"
+                          data-bs-toggle="modal" data-bs-target="#resetPwModal"
+                          data-user-id="{{ u.id }}" data-user-name="{{ u.display_name }}">
+                    <i class="bi bi-key"></i>
+                  </button>
+                </div>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white fw-bold">
+        <i class="bi bi-person-plus me-2 text-success"></i>사용자 추가
+      </div>
+      <div class="card-body">
+        <form method="post" action="{{ url_for('admin_user_new') }}">
+          <div class="mb-2">
+            <input type="text" name="username" class="form-control" placeholder="아이디 *" required>
+          </div>
+          <div class="mb-2">
+            <input type="text" name="display_name" class="form-control" placeholder="이름 *" required>
+          </div>
+          <div class="mb-2">
+            <input type="password" name="password" class="form-control" placeholder="비밀번호 *" required>
+          </div>
+          <div class="mb-3">
+            <select name="role" class="form-select">
+              <option value="member">일반 사용자</option>
+              <option value="admin">관리자</option>
+            </select>
+          </div>
+          <button class="btn btn-success w-100">추가</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 비밀번호 초기화 모달 -->
+<div class="modal fade" id="resetPwModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="post" id="resetPwForm">
+        <div class="modal-header">
+          <h5 class="modal-title">비밀번호 초기화</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p id="resetPwUserName" class="text-muted small mb-3"></p>
+          <input type="password" name="new_password" class="form-control" placeholder="새 비밀번호 (4자 이상)" required>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">취소</button>
+          <button type="submit" class="btn btn-primary">변경</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('resetPwModal').addEventListener('show.bs.modal', function(e) {
+  const btn = e.relatedTarget;
+  const userId = btn.dataset.userId;
+  const userName = btn.dataset.userName;
+  document.getElementById('resetPwUserName').textContent = '대상: ' + userName;
+  document.getElementById('resetPwForm').action = '/admin/users/' + userId + '/reset_pw';
+});
+</script>
+{% endblock %}

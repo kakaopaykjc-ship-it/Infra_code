@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% block title %}{% if doc %}편집: {{ doc.title }}{% else %}새 문서{% endif %} — 사내 Wiki{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-10">
+    <h4 class="fw-bold mb-4">
+      <i class="bi bi-pencil-square me-2 text-primary"></i>
+      {% if doc %}문서 편집{% else %}새 문서 작성{% endif %}
+    </h4>
+
+    <form method="post" id="docForm">
+      <div class="row g-3 mb-3">
+        <div class="col-md-8">
+          <label class="form-label fw-semibold">제목 <span class="text-danger">*</span></label>
+          <input type="text" name="title" class="form-control form-control-lg"
+                 value="{{ doc.title if doc else '' }}" required placeholder="문서 제목을 입력하세요">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label fw-semibold">카테고리</label>
+          <select name="category_id" class="form-select form-select-lg">
+            <option value="">-- 선택 안 함 --</option>
+            {% for cat in categories %}
+            <option value="{{ cat.id }}"
+              {% if doc and doc.category_id == cat.id %}selected{% endif %}>
+              {{ cat.name }}
+            </option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-1 d-flex align-items-end">
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" name="is_public" value="1" id="isPublic"
+                   {% if not doc or doc.is_public %}checked{% endif %}>
+            <label class="form-check-label" for="isPublic">공개</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">내용 (마크다운)</label>
+        <textarea name="content" id="editor">{{ doc.content if doc else '' }}</textarea>
+      </div>
+
+      {% if doc %}
+      <div class="mb-3">
+        <label class="form-label fw-semibold">수정 요약</label>
+        <input type="text" name="summary" class="form-control" placeholder="어떤 내용을 수정했나요? (선택)">
+      </div>
+      {% endif %}
+
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-save me-1"></i>저장
+        </button>
+        {% if doc %}
+        <a href="{{ url_for('doc_view', doc_id=doc.id) }}" class="btn btn-outline-secondary">취소</a>
+        {% else %}
+        <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">취소</a>
+        {% endif %}
+      </div>
+    </form>
+
+    <!-- 첨부파일 영역 (문서가 있을 때만) -->
+    {% if doc %}
+    <hr class="my-4">
+    <h6 class="fw-bold"><i class="bi bi-paperclip me-2"></i>첨부파일 관리</h6>
+
+    <div id="dropzone" class="border border-2 border-dashed rounded p-4 text-center text-muted mb-3"
+         style="cursor:pointer;">
+      <i class="bi bi-cloud-upload" style="font-size:2rem;"></i>
+      <p class="mb-0 mt-2">파일을 여기에 끌어다 놓거나 클릭하여 업로드</p>
+      <input type="file" id="fileInput" style="display:none" multiple>
+    </div>
+    <div id="uploadProgress" class="d-none mb-3">
+      <div class="progress"><div class="progress-bar progress-bar-striped progress-bar-animated" style="width:100%"></div></div>
+    </div>
+
+    <ul class="list-group" id="attachList">
+      {% for att in doc.attachments %}
+      <li class="list-group-item d-flex justify-content-between align-items-center" id="att-{{ att.id }}">
+        <div>
+          {% if att.original_name.lower().split('.')[-1] in ['png','jpg','jpeg','gif','webp'] %}
+            <i class="bi bi-image text-success me-2"></i>
+          {% else %}
+            <i class="bi bi-file-earmark me-2 text-secondary"></i>
+          {% endif %}
+          <a href="{{ url_for('download_file', att_id=att.id) }}" target="_blank">{{ att.original_name }}</a>
+          <small class="text-muted ms-2">({{ (att.file_size / 1024)|round(1) }} KB)</small>
+        </div>
+        <form action="{{ url_for('delete_file', att_id=att.id) }}" method="post"
+              onsubmit="return confirm('파일을 삭제하시겠습니까?')">
+          <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+        </form>
+      </li>
+      {% else %}
+      <li class="list-group-item text-muted small" id="no-att">첨부파일이 없습니다.</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 마크다운 에디터 초기화
+const easyMDE = new EasyMDE({
+  element: document.getElementById('editor'),
+  spellChecker: false,
+  autofocus: false,
+  placeholder: "마크다운으로 내용을 작성하세요...\n\n# 제목\n## 소제목\n**굵게** *기울임* `코드`",
+  toolbar: [
+    "bold","italic","heading","|",
+    "quote","unordered-list","ordered-list","|",
+    "link","image","table","horizontal-rule","|",
+    "preview","side-by-side","fullscreen","|","guide"
+  ],
+  minHeight: "400px",
+});
+
+{% if doc %}
+// 파일 드래그앤드롭 업로드
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const attachList = document.getElementById('attachList');
+const uploadProgress = document.getElementById('uploadProgress');
+const uploadUrl = "{{ url_for('upload_file', doc_id=doc.id) }}";
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('bg-light'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('bg-light'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('bg-light');
+  uploadFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', () => uploadFiles(fileInput.files));
+
+function uploadFiles(files) {
+  Array.from(files).forEach(file => {
+    const fd = new FormData();
+    fd.append('file', file);
+    uploadProgress.classList.remove('d-none');
+    fetch(uploadUrl, { method: 'POST', body: fd })
+      .then(r => r.json())
+      .then(data => {
+        uploadProgress.classList.add('d-none');
+        if (data.error) { alert(data.error); return; }
+        const noAtt = document.getElementById('no-att');
+        if (noAtt) noAtt.remove();
+        const icon = data.is_image
+          ? '<i class="bi bi-image text-success me-2"></i>'
+          : '<i class="bi bi-file-earmark me-2 text-secondary"></i>';
+        const li = document.createElement('li');
+        li.className = 'list-group-item d-flex justify-content-between align-items-center';
+        li.id = 'att-' + data.id;
+        li.innerHTML = `<div>${icon}<a href="${data.url}" target="_blank">${data.name}</a></div>
+          <form action="/file/${data.id}/delete" method="post" onsubmit="return confirm('파일을 삭제하시겠습니까?')">
+            <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+          </form>`;
+        attachList.appendChild(li);
+        // 에디터에 이미지 마크다운 자동 삽입
+        if (data.is_image) {
+          easyMDE.codemirror.replaceSelection(`\n![${data.name}](${data.url})\n`);
+        }
+      })
+      .catch(() => { uploadProgress.classList.add('d-none'); alert('업로드 실패'); });
+  });
+}
+{% endif %}
+</script>
+{% endblock %}

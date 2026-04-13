@@ -1,0 +1,5 @@
+Linux_Vul_Check.txt -> Linux_Vul_Check.sh 로 변경 후 사용
+Win_Vul_Check.txt -> Win_Vul_Check.ps1 로 변경 후 사용
+
+
+PowerShell -ExecutionPolicy Bypass -File .\Vul_Check.ps1

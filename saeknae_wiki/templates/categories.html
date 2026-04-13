@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}카테고리 — 사내 Wiki{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+  <div class="col-lg-8">
+    <h5 class="fw-bold mb-4"><i class="bi bi-folder2-open me-2 text-primary"></i>카테고리별 문서</h5>
+
+    {% for cat in cats %}
+    <div class="card border-0 shadow-sm mb-4" id="cat-{{ cat.id }}">
+      <div class="card-header bg-white d-flex justify-content-between align-items-center">
+        <div>
+          <span class="fw-bold">{{ cat.name }}</span>
+          {% if cat.description %}<small class="text-muted ms-2">— {{ cat.description }}</small>{% endif %}
+        </div>
+        <span class="badge bg-primary">{{ cat.documents|length }}개</span>
+      </div>
+      {% if cat.documents %}
+      <div class="list-group list-group-flush">
+        {% for doc in cat.documents %}
+        {% if doc.is_public or current_user.is_admin %}
+        <a href="{{ url_for('doc_view', doc_id=doc.id) }}" class="list-group-item list-group-item-action d-flex justify-content-between">
+          <span>
+            {{ doc.title }}
+            {% if not doc.is_public %}<i class="bi bi-lock-fill text-secondary ms-1"></i>{% endif %}
+          </span>
+          <small class="text-muted">{{ doc.updated_at.strftime('%Y-%m-%d') }}</small>
+        </a>
+        {% endif %}
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="card-body text-muted small">문서가 없습니다.</div>
+      {% endif %}
+    </div>
+    {% else %}
+    <div class="text-muted">카테고리가 없습니다.</div>
+    {% endfor %}
+  </div>
+
+  {% if current_user.is_admin %}
+  <div class="col-lg-4">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white fw-bold">
+        <i class="bi bi-plus-circle me-2 text-success"></i>카테고리 추가
+      </div>
+      <div class="card-body">
+        <form method="post" action="{{ url_for('category_new') }}">
+          <div class="mb-2">
+            <input type="text" name="name" class="form-control" placeholder="카테고리 이름 *" required>
+          </div>
+          <div class="mb-3">
+            <input type="text" name="description" class="form-control" placeholder="설명 (선택)">
+          </div>
+          <button class="btn btn-success w-100">추가</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mt-3">
+      <div class="card-header bg-white fw-bold text-danger">
+        <i class="bi bi-trash me-2"></i>카테고리 삭제
+      </div>
+      <div class="list-group list-group-flush">
+        {% for cat in cats %}
+        <div class="list-group-item d-flex justify-content-between align-items-center">
+          {{ cat.name }}
+          <form action="{{ url_for('category_delete', cat_id=cat.id) }}" method="post"
+                onsubmit="return confirm('카테고리를 삭제하시겠습니까?\n(문서는 삭제되지 않습니다)')">
+            <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+          </form>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
