@@ -1,0 +1,36 @@
+[Unit]
+Description=VulCheck 관리 서버 (Gunicorn)
+After=network.target
+
+[Service]
+User=vulcheck
+Group=vulcheck
+WorkingDirectory=/opt/vulcheck
+EnvironmentFile=/opt/vulcheck/.env
+
+ExecStart=/opt/vulcheck/venv/bin/gunicorn \
+    --workers 2 \
+    --bind unix:/run/vulcheck/vulcheck.sock \
+    --timeout 60 \
+    --access-logfile /var/log/vulcheck/access.log \
+    --error-logfile /var/log/vulcheck/error.log \
+    app:app
+
+ExecReload=/bin/kill -s HUP $MAINPID
+
+RuntimeDirectory=vulcheck
+RuntimeDirectoryMode=0750
+LogsDirectory=vulcheck
+LogsDirectoryMode=0750
+
+Restart=on-failure
+RestartSec=5
+
+# 보안 강화
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/vulcheck/vul_check.db /var/log/vulcheck
+
+[Install]
+WantedBy=multi-user.target
