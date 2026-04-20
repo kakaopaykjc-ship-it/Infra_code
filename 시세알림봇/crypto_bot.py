@@ -12,33 +12,34 @@ COINS = [
 
 def get_crypto_prices():
     ids = ",".join(c["id"] for c in COINS)
+    markets = ",".join(f"KRW-{c['upbit']}" for c in COINS)
 
-    # USD 시세 + 24h 고가/저가/등락률
+    # USD 시세 + 24h 고가/저가
     usd_url = (
         f"https://api.coingecko.com/api/v3/coins/markets"
         f"?vs_currency=usd&ids={ids}&price_change_percentage=24h"
     )
-    # KRW 현재 시세
-    krw_url = (
-        f"https://api.coingecko.com/api/v3/simple/price"
-        f"?ids={ids}&vs_currencies=krw"
-    )
+    # 업비트 KRW 실거래가 + 등락률
+    upbit_url = f"https://api.upbit.com/v1/ticker?markets={markets}"
 
     usd_res = requests.get(usd_url, timeout=10)
-    krw_res = requests.get(krw_url, timeout=10)
+    upbit_res = requests.get(upbit_url, timeout=10)
     usd_res.raise_for_status()
-    krw_res.raise_for_status()
+    upbit_res.raise_for_status()
 
     usd_data = {item["id"]: item for item in usd_res.json()}
-    krw_data = krw_res.json()
+    upbit_data = {item["market"]: item for item in upbit_res.json()}
 
     results = []
     for coin in COINS:
         cid = coin["id"]
+        market = f"KRW-{coin['upbit']}"
         u = usd_data.get(cid, {})
-        krw_price = krw_data.get(cid, {}).get("krw", 0)
+        ub = upbit_data.get(market, {})
 
-        change = u.get("price_change_percentage_24h", 0) or 0
+        krw_price = ub.get("trade_price", 0)
+        opening_price = ub.get("opening_price", 0)
+        change = ((krw_price - opening_price) / opening_price * 100) if opening_price else 0
         change_str = f"+{change:.2f}%" if change >= 0 else f"{change:.2f}%"
         arrow = "📈" if change >= 0 else "📉"
 
