@@ -1,6 +1,7 @@
 import requests
 import time
 from datetime import datetime
+from io import BytesIO
 from config import TELEGRAM_TOKEN, CHAT_ID, LOCATIONS
 
 WEATHER_KO = {
@@ -187,6 +188,23 @@ def format_message(weather_list):
     return "\n".join(lines)
 
 
+def make_caption(weather_list):
+    today = datetime.now()
+    date_str = f"{today.month}/{today.day}({DAY_KO[today.weekday()]})"
+    lines = [f"☀️ 오늘의 날씨 — {date_str}"]
+    for w in weather_list:
+        if "error" in w:
+            lines.append(f"📍 {w['name']}: 정보 불러오기 실패")
+            continue
+        emoji = weather_emoji(w["code"])
+        lines.append(
+            f"📍 {w['name']} {emoji} {w['temp']}°C / 강수 {w['rain']}%"
+        )
+        for a in w.get("alerts") or []:
+            lines.append(f"  ⚠️ {a}")
+    return "\n".join(lines)
+
+
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message}
@@ -194,11 +212,40 @@ def send_telegram(message):
     res.raise_for_status()
 
 
+def send_telegram_photo(photo, caption=""):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    files = {"photo": ("weather.png", photo, "image/png")}
+    data = {"chat_id": CHAT_ID, "caption": caption}
+    res = requests.post(url, data=data, files=files, timeout=20)
+    res.raise_for_status()
+
+
 def main():
     weather_list = [get_weather(loc["query"], loc["name"]) for loc in LOCATIONS]
-    message = format_message(weather_list)
-    send_telegram(message)
-    print("날씨 알림 전송 완료")
+
+    # 카드/캡션 양쪽에서 사용할 알림 채우기
+    for w in weather_list:
+        if "error" not in w:
+            w["alerts"] = get_smart_alerts(w)
+
+    # 카드 이미지 전송 시도, 실패 시 텍스트로 fallback
+    try:
+        from weather_card import render
+
+        valid = [w for w in weather_list if "error" not in w]
+        if not valid:
+            raise RuntimeError("렌더링 가능한 날씨 데이터 없음")
+
+        img = render({"date": datetime.now(), "cities": valid})
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        send_telegram_photo(buf, caption=make_caption(weather_list))
+        print("날씨 카드 이미지 전송 완료")
+    except Exception as e:
+        print(f"카드 이미지 실패 → 텍스트로 fallback: {e}")
+        send_telegram(format_message(weather_list))
+        print("텍스트 알림 전송 완료")
 
 
 if __name__ == "__main__":

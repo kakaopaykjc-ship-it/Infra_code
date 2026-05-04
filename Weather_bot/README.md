@@ -13,6 +13,8 @@
 - **스마트 알림**: 우산·폭염·한파·일교차 등 조건 기반 자동 경고
 - **시간별 예보**: 현재 시각 이후 3시간 단위 예보
 - **주간 예보**: 내일·모레 요약 카드
+- **카드 이미지 알림**: 다크 테마 PNG 카드를 텔레그램 사진으로 전송
+- **자동 fallback**: 카드 생성 실패 시 텍스트 메시지로 자동 전환
 - **재시도 로직**: API 호출 실패 시 자동 재시도 (3회, 5초 간격)
 
 ---
@@ -22,9 +24,10 @@
 ```
 Weather_bot/
 ├── weather_bot.py             # 메인 봇 스크립트 (운영용)
+├── weather_card.py            # 카드 이미지 렌더러 모듈
 ├── config.py                  # 텔레그램 토큰 + 지역 설정
-├── preview_card.py            # (선택) 카드 이미지 시안 생성기
-├── weather_card_preview.png   # 카드 이미지 시안 결과물
+├── preview_card.py            # (개발용) 더미 데이터로 카드 시안 PNG 생성
+├── weather_card_preview.png   # 카드 시안 결과물
 └── README.md
 ```
 
@@ -33,10 +36,23 @@ Weather_bot/
 ## 요구사항
 
 - Python 3.8+
-- `requests` 라이브러리 (`pip install requests`)
+- `requests`, `Pillow` (`pip install requests Pillow`)
+- 한글 폰트 (Linux 운영 시 필수)
 - 텔레그램 봇 토큰 + 채팅 ID
 
-> `preview_card.py`만 추가로 `Pillow`가 필요하다 (`pip install Pillow`). 운영용 봇 자체는 표준 라이브러리 + requests로 충분.
+### Rocky Linux 패키지 설치
+
+```bash
+# Python 라이브러리
+pip3 install requests Pillow
+
+# 한글 폰트 (둘 중 하나)
+sudo dnf install -y google-noto-sans-cjk-fonts
+# 또는
+sudo dnf install -y nhn-nanum-fonts
+```
+
+> 폰트가 없으면 카드 생성이 실패하면서 자동으로 텍스트 알림으로 fallback 된다. 이미지로 받고 싶으면 폰트 설치 필수.
 
 ---
 
@@ -107,13 +123,21 @@ wttr.in API 호출 → JSON 파싱 → 필요한 필드 추출.
 
 도시별 카드를 조합해 최종 메시지 생성. 알림 → 시간별 → 주간 순서.
 
-### `send_telegram(message)`
+### `make_caption(weather_list)`
 
-텔레그램 봇 API의 `sendMessage` 엔드포인트 호출.
+카드 이미지에 첨부할 짧은 캡션 생성 (날짜 + 도시별 한 줄 요약 + 알림).
+
+### `send_telegram(message)` / `send_telegram_photo(photo, caption)`
+
+각각 `sendMessage` / `sendPhoto` 엔드포인트 호출. 텍스트는 fallback용.
 
 ### `main()`
 
-설정된 모든 지역을 순회하며 `get_weather` → `format_message` → `send_telegram`.
+흐름: 지역 순회 → 날씨 조회 → 알림 채우기 → **카드 이미지 생성·전송 시도 → 실패 시 텍스트로 fallback**.
+
+### `weather_card.render(data)` (별도 모듈)
+
+도시별 날씨 데이터를 받아 PIL Image를 반환. 폰트 경로는 Windows·Rocky·Ubuntu 등 여러 경로를 자동 탐색.
 
 ---
 
@@ -151,31 +175,47 @@ wttr.in API 호출 → JSON 파싱 → 필요한 필드 추출.
 
 ---
 
-## 시안: 카드 이미지 알림 (예정)
+## 카드 이미지 알림
 
-`preview_card.py`는 텔레그램 메시지를 이미지 카드로 전송하기 위한 디자인 시안 생성기.
+운영용 `weather_bot.py`가 매 실행마다 `weather_card.render()`로 PNG를 메모리에 생성해 텔레그램 `sendPhoto`로 전송한다.
 
-다크 테마, 도시별 카드, 시간별 막대 그래프, 주간 미니 카드 등을 포함한 PNG를 생성한다. 결과물은 `weather_card_preview.png` 참고.
+- **다크 테마**, 도시별 카드, 시간별 막대 그래프, 주간 미니 카드 포함
+- 캡션에는 날짜·도시별 요약·알림만 짧게 들어감 (시각 정보는 이미지가 전달)
+- 카드 생성·전송이 실패하면 자동으로 텍스트 메시지로 fallback (안전망)
 
-운영용 `weather_bot.py`에는 아직 통합되지 않은 상태.
+`preview_card.py`는 더미 데이터로 디자인 시안만 미리 보고 싶을 때 사용:
+
+```bash
+python3 preview_card.py    # weather_card_preview.png 생성
+```
 
 ---
 
 ## 배포 가이드 (Rocky Linux)
 
 ```bash
-# 최초 배포
+# 1. 의존성 설치
+pip3 install requests Pillow
+sudo dnf install -y google-noto-sans-cjk-fonts   # 또는 nhn-nanum-fonts
+
+# 2. 코드 배치
 mkdir -p /weather_bot && cd /weather_bot
-git clone <repo>
-# 또는 weather_bot.py와 config.py 두 파일만 복사
+# 운영에 필요한 파일은 다음 3개:
+#   weather_bot.py, weather_card.py, config.py
 
-# config.py에 토큰/CHAT_ID 입력 후
-python3 weather_bot.py    # 동작 테스트
-crontab -e                 # 스케줄 등록
+# 3. config.py에 토큰/CHAT_ID 입력 후 동작 테스트
+python3 weather_bot.py
 
-# 코드 업데이트
+# 4. 크론 등록
+crontab -e
+```
+
+### 코드 업데이트 (이미 배포된 서버에서)
+
+```bash
 cd /weather_bot
-curl -o weather_bot.py https://raw.githubusercontent.com/kakaopaykjc-ship-it/Infra_code/main/Weather_bot/weather_bot.py
+curl -o weather_bot.py  https://raw.githubusercontent.com/kakaopaykjc-ship-it/Infra_code/main/Weather_bot/weather_bot.py
+curl -o weather_card.py https://raw.githubusercontent.com/kakaopaykjc-ship-it/Infra_code/main/Weather_bot/weather_card.py
 ```
 
 ---
@@ -183,5 +223,8 @@ curl -o weather_bot.py https://raw.githubusercontent.com/kakaopaykjc-ship-it/Inf
 ## 트러블슈팅
 
 - **메시지가 안 옴**: `python3 weather_bot.py` 수동 실행해서 에러 확인. 토큰/CHAT_ID 점검.
+- **이미지 대신 텍스트로 옴**: 카드 생성 실패 → fallback 동작. 콘솔 로그에 원인 표시. 주로 폰트 또는 Pillow 미설치.
+  - `pip3 install Pillow`
+  - `sudo dnf install -y google-noto-sans-cjk-fonts`
 - **wttr.in 응답 실패**: 무료 API라 가끔 일시 장애가 있음. 재시도 로직이 있지만 그래도 실패하면 다음 실행 주기까지 대기.
 - **한글이 깨짐**: 텔레그램 측 문제는 거의 없음. 서버 로케일이 UTF-8인지 확인 (`locale` 명령).
