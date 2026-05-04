@@ -81,9 +81,6 @@ def get_weather(query, name, retries=3, retry_delay=5):
             high = today["maxtempC"]
             humidity = current["humidity"]
 
-            rain_chances = [int(h["chanceofrain"]) for h in today["hourly"]]
-            rain = max(rain_chances)
-
             # 시간별 예보: 현재 시각 이후 시간대만
             now_hour = datetime.now().hour
             hourly = []
@@ -96,6 +93,9 @@ def get_weather(query, name, retries=3, retry_delay=5):
                         "rain": int(h["chanceofrain"]),
                         "code": int(h["weatherCode"]),
                     })
+
+            # 강수확률: 앞으로 남은 시간대 기준 (이미 지나간 새벽 비 제외)
+            rain = max((h["rain"] for h in hourly), default=0)
 
             # 주간 예보: 내일, 모레
             weekly = []
