@@ -1,4 +1,4 @@
-# Vul_Check — 주요정보통신기반시설 취약점 점검 스크립트
+# Vul_Check: 주요정보통신기반시설 취약점 점검 스크립트
 
 KISA 주요정보통신기반시설 기술적 취약점 분석·평가 기준에 따라 Linux/Windows 서버를 자동 점검하는 스크립트.
 
@@ -9,7 +9,7 @@ KISA 주요정보통신기반시설 기술적 취약점 분석·평가 기준에
 ```
 Vul_Check/
 ├── Linux_Vul_Check.sh    # Linux/Unix 취약점 점검 스크립트 (U_01 ~ U_67)
-├── Win_Vul_Check.txt     # Windows 취약점 점검 스크립트 (W-01 ~ W-64) — .ps1로 변경 후 사용
+├── Win_Vul_Check.txt     # Windows 취약점 점검 스크립트 (W-01 ~ W-64), .ps1로 변경 후 사용
 └── 사용 전 입력.txt       # 간단 사용 안내
 ```
 
@@ -18,7 +18,7 @@ Vul_Check/
 ## Linux 점검 스크립트 (`Linux_Vul_Check.sh`)
 
 ### 점검 항목
-U_01 ~ U_67 (67개 항목) — KISA Unix/Linux 서버 취약점 점검 기준
+KISA Unix/Linux 서버 취약점 점검 기준에 따른 67개 항목 (U_01 ~ U_67)
 
 ### 결과 분류
 | 결과 | 의미 |
@@ -64,11 +64,11 @@ Copy-Item Win_Vul_Check.txt Win_Vul_Check.ps1
 ```
 
 ### 점검 항목
-W-01 ~ W-64 (64개 항목) — KISA Windows 서버 취약점 점검 기준
+KISA Windows 서버 취약점 점검 기준에 따른 64개 항목 (W-01 ~ W-64)
 
 ### 실행 방법
 
-> **관리자 권한 필수** — `secedit` 명령어 실행에 필요
+> **관리자 권한 필수** (`secedit` 명령어 실행에 필요)
 
 ```powershell
 # PowerShell을 관리자 권한으로 열고 실행

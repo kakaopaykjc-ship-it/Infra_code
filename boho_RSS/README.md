@@ -1,4 +1,4 @@
-# boho_RSS — 보호나라 RSS → Mattermost 알림
+# boho_RSS: 보호나라 RSS → Mattermost 알림
 
 [보호나라(KISA)](https://www.boho.or.kr) RSS 피드를 주기적으로 감시하여 신규 글을 Mattermost 웹훅으로 전송하는 스크립트.
 
